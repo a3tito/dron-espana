@@ -1,0 +1,6 @@
+{
+  "appId": "es.dronespana.app",
+  "appName": "Dron España",
+  "webDir": "www",
+  "server": { "androidScheme": "https" }
+}

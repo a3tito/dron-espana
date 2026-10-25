@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b3d91">
+<title>Dron España</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<main id="app">
+
+  <!-- ============ MAPA ============ -->
+  <section id="view-map" class="view active">
+    <div id="map"></div>
+
+    <div class="topbar">
+      <form id="searchForm" autocomplete="off">
+        <input id="searchInput" type="search" placeholder="Busca un lugar o pega coordenadas…" enterkeyhint="search">
+        <button type="submit" aria-label="Buscar">🔍</button>
+      </form>
+      <ul id="searchResults" hidden></ul>
+    </div>
+
+    <div class="fabs">
+      <button id="btnLocate" class="fab" title="Mi ubicación" aria-label="Usar mi ubicación">📍</button>
+      <button id="btnBase" class="fab" title="Cambiar mapa base" aria-label="Cambiar mapa base">🛰️</button>
+      <button id="btnLayers" class="fab" title="Capas ENAIRE" aria-label="Capas ENAIRE">🗂️</button>
+    </div>
+    <div id="layersPanel" class="panel" hidden>
+      <strong>Capas ENAIRE</strong>
+      <label><input type="checkbox" data-layer="aero" checked> <i class="dot c-aero"></i> Aeronáutica (aeródromos, CTR, ATZ…)</label>
+      <label><input type="checkbox" data-layer="infra" checked> <i class="dot c-infra"></i> Infraestructuras</label>
+      <small>Las zonas se pintan según la altura de vuelo que elijas.</small>
+    </div>
+    <div id="mapHint" class="maphint" hidden></div>
+
+    <div id="sheet" class="sheet">
+      <button id="sheetHandle" class="handle" aria-label="Ampliar o reducir panel"><span></span></button>
+      <div class="sheet-body" id="sheetBody"></div>
+    </div>
+  </section>
+
+  <!-- ============ PERMISOS ============ -->
+  <section id="view-permits" class="view"><div class="page" id="permitsBody"></div></section>
+
+  <!-- ============ NOTICIAS ============ -->
+  <section id="view-news" class="view"><div class="page" id="newsBody"></div></section>
+
+  <!-- ============ PERFIL ============ -->
+  <section id="view-profile" class="view"><div class="page" id="profileBody"></div></section>
+
+  <!-- ============ GUÍA ============ -->
+  <section id="view-guide" class="view"><div class="page" id="guideBody"></div></section>
+
+</main>
+
+<nav id="nav">
+  <button data-view="map" class="active"><span>🗺️</span>Mapa</button>
+  <button data-view="permits"><span>📝</span>Permisos <b id="permBadge" hidden></b></button>
+  <button data-view="news"><span>📰</span>Noticias <b id="newsBadge" hidden></b></button>
+  <button data-view="profile"><span>👤</span>Mi perfil</button>
+  <button data-view="guide"><span>📘</span>Guía</button>
+</nav>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="printDoc"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>
