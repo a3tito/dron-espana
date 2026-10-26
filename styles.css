@@ -59,6 +59,16 @@ a{color:var(--brand)}
 .handle span{display:block;width:44px;height:5px;border-radius:3px;background:var(--line);margin:0 auto}
 .sheet-body{flex:1;overflow-y:auto;padding:0 14px 20px;-webkit-overflow-scrolling:touch}
 
+.fab.on{background:#2fbf5b;box-shadow:0 0 0 3px rgba(47,191,91,.45),var(--shadow)}
+.legend{position:absolute;top:62px;left:10px;z-index:900;display:flex;gap:8px;background:rgba(20,33,61,.82);color:#fff;border-radius:16px;padding:4px 10px;font-size:.72rem}
+.legend span{display:flex;align-items:center;gap:4px;white-space:nowrap}
+.legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+.legend .lg-free{display:none}.legend.showfree .lg-free{display:flex}
+.maphint{top:96px}
+.ztip{font:.8rem/1.35 system-ui,sans-serif;border-radius:8px}
+.spot{width:30px;height:30px;border-radius:50%;background:#2fbf5b;color:#fff;font-weight:800;text-align:center;line-height:26px;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45)}
+svg text{font-family:system-ui,sans-serif}
+
 /* VEREDICTO */
 .verdict{border-radius:16px;padding:14px 16px;margin:4px 0 12px;display:flex;gap:12px;align-items:center}
 .verdict .big{font-size:2.3rem;line-height:1}

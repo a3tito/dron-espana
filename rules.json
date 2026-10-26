@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "reviewed": "2026-10-26",
+  "maxHeight": 120,
+  "maxKg": 25,
+  "registroGramos": 250,
+  "registroJulios": 80,
+  "distA2": 30,
+  "distA2Low": 5,
+  "distA3": 150,
+  "seguroSubcats": ["A2"],
+  "seguroKg": 20,
+  "edadMin": 16,
+  "edadC0": 12,
+  "refs": [
+    ["Real Decreto 517/2024 (BOE)", "https://www.boe.es/buscar/doc.php?id=BOE-A-2024-11377"],
+    ["AESA · categoría abierta", "https://www.seguridadaerea.gob.es/es/ambitos/drones/operaciones-uas-drones/operaciones-con-uas-drones---categoria-abierta-subcategorias-a1-a2-y-a3"],
+    ["AESA · UAS de menos de 250 g", "https://www.seguridadaerea.gob.es/sites/default/files/Nota%20informativa%20relativa%20a%20UAS%20de%20menos%20de%20250%20gramos.pdf"]
+  ],
+  "changelog": [
+    { "date": "2026-10-26", "text": "Corregido el seguro: NO es obligatorio en A1 ni A3 (menos de 20 kg). Solo es obligatorio en A2, categoría específica y certificada (art. 8 del RD 517/2024). Los drones de menos de 250 g vuelan en A1: sin seguro obligatorio." },
+    { "date": "2026-10-26", "text": "Ahora puedes guardar varios drones y ver qué puedes hacer con cada uno en cada sitio." }
+  ]
+}

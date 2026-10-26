@@ -29,7 +29,8 @@
 
     <div class="fabs">
       <button id="btnLocate" class="fab" title="Mi ubicación" aria-label="Usar mi ubicación">📍</button>
-      <button id="btnBase" class="fab" title="Cambiar mapa base" aria-label="Cambiar mapa base">🛰️</button>
+      <button id="btnBase" class="fab" title="Cambiar mapa: satélite / mapa" aria-label="Cambiar mapa: satélite o mapa">🛰️</button>
+      <button id="btnFree" class="fab" title="Dónde puedo volar (verde)" aria-label="Mostrar en verde dónde puedo volar">🟢</button>
       <button id="btnLayers" class="fab" title="Capas ENAIRE" aria-label="Capas ENAIRE">🗂️</button>
     </div>
     <div id="layersPanel" class="panel" hidden>
@@ -37,6 +38,9 @@
       <label><input type="checkbox" data-layer="aero" checked> <i class="dot c-aero"></i> Aeronáutica (aeródromos, CTR, ATZ…)</label>
       <label><input type="checkbox" data-layer="infra" checked> <i class="dot c-infra"></i> Infraestructuras</label>
       <small>Las zonas se pintan según la altura de vuelo que elijas.</small>
+    </div>
+    <div id="legend" class="legend" aria-label="Leyenda de colores">
+      <span><i style="background:#e5383b"></i>Permiso</span><span><i style="background:#8c0a26"></i>Prohibido</span><span><i style="background:#f2a900"></i>Condiciones</span><span class="lg-free"><i style="background:#2fbf5b"></i>Libre</span>
     </div>
     <div id="mapHint" class="maphint" hidden></div>
 

@@ -49,37 +49,63 @@ const ENLACES = {
   boe: 'https://www.boe.es',
 };
 
-/** Qué puede/debe hacer el piloto con SU dron (UE 2019/947 + RD 517/2024). Orientativo: confirma en AESA. */
+/* Parámetros normativos. Los valores de aquí son los de reserva: al abrir la app se descarga rules.json y los sustituye,
+   así una norma nueva se aplica editando ese archivo, sin reinstalar nada. Fuentes: Reglamento UE 2019/947, RD 517/2024
+   (art. 8 seguro) y notas de AESA (comprobado el 26/10/2026). */
+const RULES = {
+  version: 1, reviewed: '2026-10-26',
+  maxHeight: 120, maxKg: 25, registroGramos: 250, registroJulios: 80,
+  distA2: 30, distA2Low: 5, distA3: 150,
+  seguroSubcats: ['A2'], seguroKg: 20, edadMin: 16, edadC0: 12,
+  refs: [
+    ['Real Decreto 517/2024 (BOE)', 'https://www.boe.es/buscar/doc.php?id=BOE-A-2024-11377'],
+    ['AESA · categoría abierta', 'https://www.seguridadaerea.gob.es/es/ambitos/drones/operaciones-uas-drones/operaciones-con-uas-drones---categoria-abierta-subcategorias-a1-a2-y-a3'],
+  ],
+};
+const RULES_URL = 'rules.json'; // el APK lo apunta a la web publicada para recibir las reglas nuevas sin reinstalar
+async function cargarReglas() {
+  for (const u of [RULES_URL, 'rules.json']) {
+    try { const r = await fetch(u + '?' + Date.now()); if (r.ok) { Object.assign(RULES, await r.json()); return; } } catch { /* siguiente origen */ }
+  }
+}
+
+/** Qué puede/debe hacer el piloto con SU dron. Orientativo: manda siempre la norma oficial. */
 function reglasDron(prof) {
   const g = Number(prof.droneG) || 0;
   const cls = prof.droneClass || '';
   const cam = prof.droneCamera !== false;
   if (!g && !cls) return null;
-  let sub, subTxt, cert, certTxt;
-  if (cls === 'C0' || (!cls && g && g < 250)) {
-    sub = 'A1'; subTxt = 'Categoría abierta · subcategoría A1';
-    cert = false; certTxt = 'No necesitas curso: basta leer el manual del fabricante.';
+  const notas = [];
+  let sub, cert, certTxt;
+  if (cls === 'C0' || (!cls && g && g < RULES.registroGramos)) {
+    sub = 'A1'; cert = false;
+    certTxt = 'No hace falta carné: basta conocer las instrucciones del fabricante (o hacer el curso y examen gratuitos de AESA).';
+    if (!cls) notas.push('Sin etiqueta de clase solo vale en categoría abierta si se puso a la venta antes del 1 de enero de 2024. Si es posterior, debe llevar etiqueta C0.');
   } else if (cls === 'C1') {
-    sub = 'A1'; subTxt = 'Categoría abierta · subcategoría A1';
-    cert = true; certTxt = 'Certificado de piloto A1/A3 (examen online de AESA).';
+    sub = 'A1'; cert = true; certTxt = 'Certificado de piloto A1/A3 (curso y examen online gratuitos de AESA).';
   } else if (cls === 'C2') {
-    sub = 'A2'; subTxt = 'Categoría abierta · subcategoría A2';
-    cert = true; certTxt = 'Certificado de piloto A2 (además del A1/A3).';
+    sub = 'A2'; cert = true; certTxt = 'Certificado de piloto A2 (además del A1/A3).';
   } else {
-    sub = 'A3'; subTxt = 'Categoría abierta · subcategoría A3';
-    cert = true; certTxt = 'Certificado de piloto A1/A3 (examen online de AESA).';
+    sub = 'A3'; cert = true; certTxt = 'Certificado de piloto A1/A3 (curso y examen online gratuitos de AESA).';
+    if (!cls) notas.push('Sin etiqueta de clase solo vale en categoría abierta si se puso a la venta antes del 1 de enero de 2024. Si es posterior, necesita etiqueta de clase (C1–C4).');
   }
-  const registro = g >= 250 || cam;
-  const limites = ['Altura máxima: 120 m sobre el suelo.', 'Siempre a la vista (sin perderlo de vista a simple vista).',
-    'Máximo 25 kg de peso.'];
-  if (sub === 'A1') limites.push('No sobrevueles concentraciones de personas. Pasar sobre alguien ajeno solo de forma ocasional, y evítalo.');
-  if (sub === 'A2') limites.push('Mantén al menos 30 m de personas ajenas (5 m en modo de baja velocidad).');
-  if (sub === 'A3') limites.push('Vuela a 150 m o más de zonas residenciales, comerciales, industriales o recreativas, y lejos de personas.');
+  const registro = g >= RULES.registroGramos || cam;
+  const seguro = RULES.seguroSubcats.includes(sub) || g >= RULES.seguroKg * 1000;
+  const limites = [`Altura máxima: ${RULES.maxHeight} m sobre el suelo.`, 'Siempre a la vista (VLOS), salvo modo «sígueme» o con observador.',
+    `Peso máximo ${RULES.maxKg} kg. No lances objetos ni transportes mercancías peligrosas.`];
+  if (sub === 'A1') limites.push('No sobrevueles concentraciones de personas, ni personas ajenas a la operación si puedes evitarlo.');
+  if (sub === 'A2') limites.push(`Mantén al menos ${RULES.distA2} m de personas ajenas (hasta ${RULES.distA2Low} m con el modo de baja velocidad activado).`);
+  if (sub === 'A3') limites.push(`Vuela lejos de personas y a ${RULES.distA3} m o más de zonas residenciales, comerciales, industriales o recreativas.`);
+  const a1c0 = sub === 'A1' && (cls === 'C0' || (!cls && g < RULES.registroGramos));
   return {
-    sub, subTxt, cert, certTxt, registro, g, limites,
+    sub, subTxt: `Categoría abierta · subcategoría ${sub}`, cert, certTxt, registro, seguro, g, limites, notas,
     registroTxt: registro
-      ? 'Debes estar registrado como operador en AESA y llevar tu número de operador visible en el dron.'
-      : 'No es obligatorio registrarse (menos de 250 g y sin cámara), aunque es recomendable.',
+      ? 'Debes registrarte como operador en AESA (es gratis) y poner tu número visible en el dron. Un dron con cámara de menos de 250 g también debe registrarse, salvo que sea un juguete certificado (Directiva 2009/48/CE).'
+      : 'No es obligatorio registrarse: menos de 250 g, sin cámara ni sensor y sin superar 80 J de energía en un impacto.',
+    seguroTxt: seguro
+      ? (g >= RULES.seguroKg * 1000 ? 'Seguro obligatorio (20 kg o más: Reglamento CE 785/2004).' : 'Seguro de responsabilidad civil obligatorio en la subcategoría A2 (art. 8 RD 517/2024).')
+      : `El seguro NO es obligatorio en la subcategoría ${sub} (art. 8 RD 517/2024: las operaciones A1 y A3 de menos de 20 kg están exceptuadas). Es recomendable, pero no obligatorio.`,
+    edadTxt: a1c0 ? `Edad mínima para pilotar: ${RULES.edadC0} años (${RULES.edadMin} para registrarte como operador).` : `Edad mínima: ${RULES.edadMin} años.`,
   };
 }
 

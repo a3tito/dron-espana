@@ -12,8 +12,17 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 
 /* ---------- almacenamiento local (solo en tu móvil) ---------- */
 const DB_KEY = 'dronEspana.v1';
-const DB = { profile: {}, requests: [], checks: {}, docs: [], seenNews: '', onboarded: false, layers: { aero: true, urbano: true, infra: true } };
-function dbLoad() { try { Object.assign(DB, JSON.parse(localStorage.getItem(DB_KEY) || '{}')); } catch { /* sin almacenamiento */ } }
+const DB = { profile: {}, drones: null, activeDrone: '', requests: [], checks: {}, docs: [], seenNews: '', onboarded: false, layers: { aero: true, urbano: true, infra: true } };
+function dbLoad() {
+  try { Object.assign(DB, JSON.parse(localStorage.getItem(DB_KEY) || '{}')); } catch { /* sin almacenamiento */ }
+  if (!Array.isArray(DB.drones)) { // versión anterior: un solo dron dentro del perfil
+    DB.drones = []; const p = DB.profile || {};
+    if (p.droneName || p.droneG) { const d = { id: uid(), droneName: p.droneName || '', droneG: p.droneG || '', droneClass: p.droneClass || '', droneCamera: p.droneCamera !== false, droneSerial: p.droneSerial || '', maxWind: p.maxWind || '', droneModel: p.droneModel || '' }; DB.drones.push(d); DB.activeDrone = d.id; }
+  }
+}
+/* Varios drones: cada uno con su peso, clase, cámara y límite de viento. El «activo» es el que se usa por defecto en las solicitudes. */
+const activeDrone = () => DB.drones.find(d => d.id === DB.activeDrone) || DB.drones[0] || null;
+const profWith = d => ({ ...DB.profile, ...(d || {}) });
 function dbSave() { try { localStorage.setItem(DB_KEY, JSON.stringify(DB)); return true; } catch { toast('No se pudo guardar: almacenamiento lleno'); return false; } }
 
 /* ---------- estado ---------- */
@@ -131,11 +140,11 @@ function procFeature(f, layer, elev, h, when) {
   const loA = Number.isNaN(lo) || lo == null ? null : Math.max(0, lo), upA = Number.isNaN(up) ? null : up == null ? Infinity : up;
   let applies = unsure ? true : (upA > 0 && (loA <= 0 || h > loA));
   const t = when.getTime(), vf = Date.parse(p.validFrom), vt = Date.parse(p.validTo);
-  if (!isNaN(vt) && vt < t) applies = false;
-  if (!isNaN(vf) && vf > t) applies = false;
+  const valid = !((!isNaN(vt) && vt < t) || (!isNaN(vf) && vf > t));
+  if (!valid) applies = false;
   const z = {
     id: p.identifier || p.OBJECTID || Math.random().toString(36).slice(2), layer, p, type: p.type || '', rank: RANK[p.type] || 0,
-    title: titleOf(p, layer), loA, upA, unsure, applies, uom, schedule: !!(p.startDateTime || p.endDateTime || p.day || p.startTime),
+    title: titleOf(p, layer), loA, upA, unsure, applies, valid, uom, schedule: !!(p.startDateTime || p.endDateTime || p.day || p.startTime),
     interval: p.intervalBefore || '', purpose: p.purpose || '', geometry: f.geometry || null,
   };
   z.contacts = extractContacts(p); z.who = whoIs(z);
@@ -175,7 +184,7 @@ function osmNearby(lat, lng, r) {
 
 /* ---------- análisis completo de un punto ---------- */
 async function setPoint(lat, lng, label, fly = true, accuracy) {
-  S.point = { lat, lng }; S.label = label || ''; S.urban = 'auto'; S.urbanHint = ''; S.raw = null; S.nearby = null; S.osm = undefined; S.failed = []; S.wx = null; S.elev = null;
+  S.point = { lat, lng }; S.label = label || ''; S.urban = 'auto'; S.urbanHint = ''; S.spots = null; S.spotsErr = false; spotLayer?.clearLayers(); S.raw = null; S.nearby = null; S.osm = undefined; S.failed = []; S.wx = null; S.elev = null;
   placeMarker(lat, lng, accuracy); if (fly) map.flyTo([lat, lng], Math.max(map.getZoom(), 13), { duration: .6 });
   setSheetTall(true); await analyze();
 }
@@ -189,7 +198,7 @@ async function analyze() {
   S.raw = []; S.failed = [];
   lr.forEach((r, i) => { if (r.status === 'fulfilled') r.value.forEach(f => S.raw.push({ f, layer: keys[i] })); else S.failed.push(LAYERS[keys[i]].label); });
   S.elev = elevR; S.wx = wxR; S.loading = false; renderSheet(); updateBadge();
-  reverseGeo(lat, lng).then(j => { if (tk !== S.token) return; S.urbanHint = urbanHint(j); if ((!S.label || /^(Punto elegido|Coordenadas)$/.test(S.label)) && j.display_name) S.label = j.display_name.split(',').slice(0, 3).join(','); renderSheet(); }).catch(() => { });
+  reverseGeo(lat, lng).then(j => { if (tk !== S.token) return; S.urbanHint = urbanHint(j); if (j.display_name) { const dir = j.display_name.split(',').slice(0, 3).join(','); if (!S.label || /^(Punto elegido|Coordenadas)$/.test(S.label)) S.label = dir; else if (S.label === 'Mi ubicación') S.label = 'Mi ubicación · ' + dir; } renderSheet(); }).catch(() => { });
   loadNearby(tk);
 }
 async function loadNearby(tk) {
@@ -247,21 +256,24 @@ function evaluate() {
     if (z.purpose) g.purposes.add(z.purpose);
   });
   const rank = active.reduce((m, z) => Math.max(m, z.rank), 0);
-  return { zones, active, groups: [...groups.values()].sort((a, b) => b.rank - a.rank), rank, urbanPending, ignored: zones.filter(z => z.layer !== 'urbano').length - active.filter(z => z.layer !== 'urbano').length };
+  // Altura hasta la que se puede volar sin tocar ninguna zona (p. ej. el espacio aéreo controlado suele empezar a 60 m).
+  const lims = zones.filter(z => z.valid && z.rank >= 1 && z.layer !== 'urbano' && z.upA !== 0).map(z => z.loA == null ? 0 : z.loA);
+  const freeUpTo = Math.max(0, Math.min(120, lims.length ? Math.min(...lims) : 120));
+  return { zones, active, freeUpTo, groups: [...groups.values()].sort((a, b) => b.rank - a.rank), rank, urbanPending, ignored: zones.filter(z => z.layer !== 'urbano').length - active.filter(z => z.layer !== 'urbano').length };
 }
 function verdictOf(ev) {
   if (S.failed.length && !(ev && ev.rank)) return { cls: 'v-warn', ico: '❓', t: 'No he podido comprobarlo', d: `ENAIRE no respondió (${S.failed.join(', ')}). No des por hecho que la zona esté libre: reintenta o consulta drones.enaire.es.` };
   if (!ev) return { cls: 'v-idle', ico: '🗺️', t: '', d: '' };
   if (ev.rank >= 3) return { cls: 'v-stop', ico: '⛔', t: 'NO VUELES AQUÍ', d: 'Hay una zona con vuelo prohibido a esa altura.' };
-  if (ev.rank === 2) return { cls: 'v-warn', ico: '🛂', t: 'NECESITAS PERMISO ANTES', d: `A ${S.height} m hay ${ev.groups.filter(g => g.rank >= 2).length} permiso(s) que pedir. Te lo dejo todo preparado abajo.` };
+  if (ev.rank === 2) return { cls: 'v-warn', ico: '🛂', t: 'NECESITAS PERMISO ANTES', d: `A ${S.height} m hay ${ev.groups.filter(g => g.rank >= 2).length} permiso(s) que pedir. ${ev.freeUpTo >= 10 ? `Si vuelas a ${ev.freeUpTo} m o menos no te afecta ninguna zona.` : 'Aquí no hay altura libre: hay que pedirlo siempre.'}` };
   if (ev.rank === 1) return { cls: 'v-warn', ico: '⚠️', t: 'PUEDES VOLAR CON CONDICIONES', d: 'Hay una zona con condiciones o aviso previo. Revisa los pasos.' };
   if (ev.urbanPending) return { cls: 'v-warn', ico: '🏘️', t: 'DEPENDE: ¿ES ZONA URBANA?', d: 'ENAIRE no marca ninguna otra zona aquí, pero en cascos urbanos hace falta autorización. Dime abajo si estás en un pueblo o ciudad.' };
   return { cls: 'v-ok', ico: '✅', t: 'PUEDES VOLAR', d: `ENAIRE no marca ninguna zona a ${S.height} m en este punto${S.urban === 'no' ? ' (campo abierto, fuera de casco urbano)' : ''}. Aplican las normas generales de la categoría abierta.` };
 }
-function wxAssess() {
+function wxAssess(drone = activeDrone()) {
   const w = S.wx?.hourly; if (!w) return null;
   const i = w.time.indexOf(localHourKey(S.when)); if (i < 0) return { none: true };
-  const maxW = Number(DB.profile.maxWind) || 10;
+  const maxW = Number(drone?.maxWind) || 10;
   const v = { gust: w.wind_gusts_10m[i], wind: w.wind_speed_10m[i], wind80: w.wind_speed_80m?.[i], rain: w.precipitation[i], vis: w.visibility?.[i], temp: w.temperature_2m[i], cloud: w.cloud_cover?.[i], maxW };
   const bad = [], meh = [];
   if (v.gust >= maxW) bad.push(`Rachas de ${v.gust.toFixed(0)} m/s: superan el límite de tu dron (${maxW} m/s)`); else if (v.gust >= maxW * .7) meh.push(`Rachas de ${v.gust.toFixed(0)} m/s: cerca del límite (${maxW} m/s)`);
@@ -273,58 +285,143 @@ function wxAssess() {
 }
 
 /* ---------- MAPA ---------- */
-let map, marker, accCircle, zoneLayer, zoneCtl, base = 0;
+let map, marker, accCircle, zoneLayer, zoneCtl, freeLayer, spotLayer, baseLayers = [];
+const SPAIN = L.latLngBounds([27.4, -18.5], [43.95, 4.7]); // la ortofoto PNOA solo cubre España
+const T = {
+  osm: () => L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 21, maxNativeZoom: 19, attribution: '© OpenStreetMap' }),
+  esri: () => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 19, attribution: 'Imagen © Esri' }),
+  pnoa: () => L.tileLayer('https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&layer=OI.OrthoimageCoverage&style=default&format=image/jpeg&tilematrixset=GoogleMapsCompatible&tilematrix={z}&tilerow={y}&tilecol={x}', { maxZoom: 21, maxNativeZoom: 19, bounds: SPAIN, attribution: 'Ortofoto PNOA © IGN' }),
+  roads: () => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 19, pane: 'labels' }),
+  places: () => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 19, pane: 'labels' }),
+};
 const BASES = [
-  () => L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap · Zonas UAS: ENAIRE' }),
-  () => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri World Imagery · Zonas UAS: ENAIRE' }),
+  { id: 'hibrido', label: 'Satélite con calles y nombres', make: () => [T.esri(), T.pnoa(), T.roads(), T.places()] },
+  { id: 'satelite', label: 'Satélite', make: () => [T.esri(), T.pnoa()] },
+  { id: 'mapa', label: 'Mapa', make: () => [T.osm()] },
 ];
-let baseLayer;
-function initMap() {
-  map = L.map('map', { zoomControl: false, center: [40.2, -3.7], zoom: 6 });
-  baseLayer = BASES[0]().addTo(map); zoneLayer = L.layerGroup().addTo(map);
-  L.control.zoom({ position: 'bottomleft' }).addTo(map);
-  map.on('click', e => setPoint(e.latlng.lat, e.latlng.lng, 'Punto elegido', false));
-  let t; map.on('moveend', () => { clearTimeout(t); t = setTimeout(loadOverlay, 450); });
+function setBase(id, say) {
+  const b = BASES.find(x => x.id === id) || BASES[0]; DB.base = b.id; dbSave();
+  baseLayers.forEach(l => map.removeLayer(l)); baseLayers = b.make(); baseLayers.forEach(l => l.addTo(map));
+  document.documentElement.dataset.base = b.id; if (say) toast('Mapa: ' + b.label);
   loadOverlay();
+}
+function initMap() {
+  let lv = null; try { lv = JSON.parse(localStorage.getItem('dronEspana.view')); } catch { /* sin vista guardada */ }
+  map = L.map('map', { zoomControl: false, center: lv?.c || [40.4168, -3.7038], zoom: lv?.z || 12, maxZoom: 21 }); // arranca en Madrid (o donde lo dejaste)
+  map.createPane('labels'); Object.assign(map.getPane('labels').style, { zIndex: 450, pointerEvents: 'none' });
+  zoneLayer = L.layerGroup().addTo(map); freeLayer = L.layerGroup().addTo(map); spotLayer = L.layerGroup().addTo(map);
+  L.control.zoom({ position: 'bottomleft' }).addTo(map); L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
+  setBase(DB.base || 'hibrido');
+  map.on('click', e => setPoint(e.latlng.lat, e.latlng.lng, 'Punto elegido', false));
+  let t; map.on('moveend', () => { clearTimeout(t); t = setTimeout(loadOverlay, 450); const c = map.getCenter(); try { localStorage.setItem('dronEspana.view', JSON.stringify({ c: [c.lat, c.lng], z: map.getZoom() })); } catch { /* ok */ } });
+  // Al abrir la app te llevo a tu posición GPS y analizo ahí mismo. (Si no hay permiso, te queda el último lugar o Madrid.)
+  setTimeout(locate, 600);
 }
 function placeMarker(lat, lng, acc) {
   if (marker) marker.setLatLng([lat, lng]); else marker = L.marker([lat, lng]).addTo(map);
   if (accCircle) { map.removeLayer(accCircle); accCircle = null; }
   if (acc) accCircle = L.circle([lat, lng], { radius: acc, weight: 1, fillOpacity: .1 }).addTo(map);
 }
-const LAYER_COL = { aero: '#d9480f', urbano: '#7048e8', infra: '#e8a200' };
-function quickApplies(p) {
-  const uom = String(p.uom || 'M').toUpperCase(), f = uom === 'FT' ? .3048 : 1;
-  if (String(p.lowerReference).toUpperCase() === 'AMSL') return true;
-  const lo = (p.lower || 0) * f; return lo <= 0 || S.height > lo;
+/* Colores como un semáforo: rojo = hace falta permiso, granate = prohibido, ámbar = condiciones, verde = libre. */
+const ZCOL = { PROHIBITED: '#8c0a26', REQ_AUTHORIZATION: '#e5383b', CONDITIONAL: '#f2a900' };
+const ZTXT = { PROHIBITED: 'Vuelo prohibido', REQ_AUTHORIZATION: 'Requiere autorización', CONDITIONAL: 'Con condiciones' };
+/* ¿Afecta esta zona a la altura elegida? Versión rápida para dibujar el mapa (usa la altitud del terreno del centro del mapa). */
+function quickApplies(p, elev = S.ovElev ?? S.elev) {
+  const uom = String(p.uom || 'M').toUpperCase(), lo = toAGL(p.lower ?? 0, p.lowerReference, uom, elev), up = toAGL(p.upper, p.upperReference, uom, elev);
+  if (Number.isNaN(lo) || Number.isNaN(up)) return true;
+  return (up == null || up > 0) && (Math.max(0, lo) <= 0 || S.height > lo);
+}
+function zoneTitle(p, layer) {
+  const nm = clean(String(p.name || '').split(/<br\s*\/?>/i)[0]);
+  return nm || (p.reasons === 'PRIVACY' ? 'Vuelo fotográfico restringido' : layer === 'infra' ? 'Infraestructura protegida' : 'Zona UAS');
+}
+function vRange(p) {
+  const f = String(p.uom || 'M').toUpperCase() === 'FT' ? .3048 : 1, r = x => `${Math.round(x * f)} m ${String(x === p.lower ? p.lowerReference : p.upperReference).toUpperCase() === 'AMSL' ? 'sobre el mar' : 'sobre el suelo'}`;
+  return `desde ${(p.lower || 0) === 0 ? 'el suelo' : r(p.lower)} hasta ${p.upper == null ? 'sin límite' : r(p.upper)}`;
+}
+const bboxOf = g => { let a = 1e9, b = 1e9, c = -1e9, d = -1e9; (function w(x) { if (typeof x[0] === 'number') { a = Math.min(a, x[0]); c = Math.max(c, x[0]); b = Math.min(b, x[1]); d = Math.max(d, x[1]); } else x.forEach(w); })(g.coordinates); return [a, b, c, d]; };
+function inGeom(f, lng, lat) {
+  const bb = f.bb; if (lng < bb[0] || lng > bb[2] || lat < bb[1] || lat > bb[3]) return false;
+  const polys = f.g.type === 'Polygon' ? [f.g.coordinates] : f.g.coordinates;
+  return polys.some(p => inRing(lng, lat, p[0]) && !p.slice(1).some(h => inRing(lng, lat, h)));
+}
+const mkFeats = feats => feats.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')).map(f => ({ g: f.geometry, p: f.properties, layer: f.layer, bb: bboxOf(f.geometry) }));
+const blocking = (fs, elev) => fs.filter(f => f.layer !== 'urbano' && RANK[f.p.type] >= 1 && quickApplies(f.p, elev));
+
+async function fetchZones(bounds, offset, signal) {
+  const env = `${bounds.getWest()},${bounds.getSouth()},${bounds.getEast()},${bounds.getNorth()}`;
+  const keys = Object.keys(LAYERS).filter(k => k !== 'urbano' && DB.layers[k]); // 'urbano' cubre todo el país: no se dibuja
+  const res = await Promise.allSettled(keys.map(k => {
+    const q = new URLSearchParams({ f: 'geojson', where: '1=1', geometry: env, geometryType: 'esriGeometryEnvelope', inSR: '4326', spatialRel: 'esriSpatialRelIntersects', outFields: 'type,name,lower,lowerReference,upper,upperReference,uom,reasons', returnGeometry: 'true', maxAllowableOffset: offset, geometryPrecision: '5' });
+    return fetch(`${ENAIRE_API}/${LAYERS[k].id}/query?${q}`, { signal }).then(r => r.json()).then(j => (j.features || []).map(f => ({ ...f, layer: k })));
+  }));
+  return { feats: res.flatMap(r => r.status === 'fulfilled' ? r.value : []), failed: res.some(r => r.status === 'rejected') };
 }
 async function loadOverlay() {
   const hint = $('#mapHint');
-  if (map.getZoom() < 8) { zoneLayer.clearLayers(); hint.hidden = false; hint.textContent = 'Acerca el mapa para ver las zonas de ENAIRE'; return; }
+  if (map.getZoom() < 8) { zoneLayer.clearLayers(); freeLayer.clearLayers(); hint.hidden = false; hint.textContent = 'Acerca el mapa para ver las zonas de ENAIRE'; return; }
   hint.hidden = true; zoneCtl?.abort(); zoneCtl = new AbortController();
-  const b = map.getBounds(), env = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`, off = (360 / (256 * 2 ** map.getZoom())) * 1.5;
-  const keys = Object.keys(LAYERS).filter(k => k !== 'urbano' && DB.layers[k]); // 'urbano' cubre todo el país: no se dibuja
-  const res = await Promise.allSettled(keys.map(k => {
-    const q = new URLSearchParams({ f: 'geojson', where: '1=1', geometry: env, geometryType: 'esriGeometryEnvelope', inSR: '4326', spatialRel: 'esriSpatialRelIntersects', outFields: 'type,name,lower,lowerReference,upper,upperReference,uom', returnGeometry: 'true', maxAllowableOffset: off, geometryPrecision: '5' });
-    return fetch(`${ENAIRE_API}/${LAYERS[k].id}/query?${q}`, { signal: zoneCtl.signal }).then(r => r.json()).then(j => ({ k, feats: j.features || [] }));
-  }));
+  const c = map.getCenter(); if (!S.ovC || haversine(c.lat, c.lng, S.ovC.lat, S.ovC.lng) > 8000) { S.ovC = { lat: c.lat, lng: c.lng }; getElevation(c.lat, c.lng).then(e => { S.ovElev = e; }).catch(() => { }); }
+  let r; try { r = await fetchZones(map.getBounds(), (360 / (256 * 2 ** map.getZoom())) * 1.5, zoneCtl.signal); } catch { return; }
   if (zoneCtl.signal.aborted) return;
-  zoneLayer.clearLayers();
-  res.forEach(r => {
-    if (r.status !== 'fulfilled') return;
-    L.geoJSON({ type: 'FeatureCollection', features: r.value.feats }, {
-      interactive: false,
-      style: f => { const p = f.properties, on = quickApplies(p), col = LAYER_COL[r.value.k]; return { color: col, weight: on ? 2 : 1, dashArray: on ? null : '5 5', fillColor: col, fillOpacity: on ? (p.type === 'PROHIBITED' ? .4 : .22) : .05 }; },
-    }).addTo(zoneLayer);
+  S.ovFeats = mkFeats(r.feats); zoneLayer.clearLayers();
+  if (r.failed) { hint.hidden = false; hint.textContent = 'Algunas zonas de ENAIRE no se han podido cargar'; }
+  S.ovFeats.forEach(f => {
+    const on = RANK[f.p.type] >= 1 && quickApplies(f.p), col = ZCOL[f.p.type] || '#8899aa';
+    L.geoJSON({ type: 'Feature', geometry: f.g, properties: f.p }, {
+      style: { color: on ? col : '#cfd8e3', weight: on ? 2.5 : 1, dashArray: on ? null : '4 5', fillColor: col, fillOpacity: !on ? .02 : f.p.type === 'PROHIBITED' ? .34 : f.p.type === 'REQ_AUTHORIZATION' ? .16 : .2 },
+    }).bindTooltip(`<b>${esc(zoneTitle(f.p, f.layer))}</b><br>${ZTXT[f.p.type] || esc(f.p.type)}<br><span style="opacity:.8">${esc(vRange(f.p))}</span>${on ? '' : '<br><i>No te afecta a ' + S.height + ' m</i>'}`, { sticky: true, className: 'ztip' }).addTo(zoneLayer);
   });
+  drawFree();
 }
+
+/* ---------- «Dónde SÍ puedo volar»: rejilla verde en las zonas sin ninguna restricción a tu altura ---------- */
+function freeCells(bounds, nx, feats, elev) {
+  const w = bounds.getEast() - bounds.getWest(), dx = w / nx, ky = Math.cos(rad(bounds.getCenter().lat)), dy = dx * ky, ny = Math.ceil((bounds.getNorth() - bounds.getSouth()) / dy), bl = blocking(feats, elev), out = [];
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    const lng = bounds.getWest() + (i + .5) * dx, lat = bounds.getSouth() + (j + .5) * dy;
+    out.push({ i, j, lat, lng, w: dx, h: dy, free: !bl.some(f => inGeom(f, lng, lat)) });
+  }
+  return { cells: out, nx, ny };
+}
+function drawFree() {
+  freeLayer.clearLayers();
+  const on = !!DB.showFree; $('#btnFree').classList.toggle('on', on); $('#legend').classList.toggle('showfree', on);
+  if (!on || !S.ovFeats) return;
+  if (map.getZoom() < 10) { const h = $('#mapHint'); h.hidden = false; h.textContent = 'Acerca el mapa para ver dónde puedes volar'; return; }
+  const b = map.getBounds(), { cells } = freeCells(b, Math.round(Math.min(48, Math.max(24, map.getSize().x / 14))), S.ovFeats, S.ovElev ?? S.elev);
+  cells.filter(c => c.free).forEach(c => L.rectangle([[c.lat - c.h / 2, c.lng - c.w / 2], [c.lat + c.h / 2, c.lng + c.w / 2]], { stroke: false, fillColor: '#27e05f', fillOpacity: .4, interactive: false }).addTo(freeLayer));
+}
+function toggleFree() { DB.showFree = !DB.showFree; dbSave(); if (DB.showFree && map.getZoom() < 12 && S.point) map.setView([S.point.lat, S.point.lng], 13); drawFree(); toast(DB.showFree ? 'Verde = ninguna zona de ENAIRE a ' + S.height + ' m. Ojo: no incluye cascos urbanos ni propiedades privadas.' : 'Capa verde desactivada'); }
+
+/* Sitios libres más cercanos a tu punto (con margen alrededor para que no estés pegado a una zona). */
+async function recommend() {
+  if (!S.point) return; const { lat, lng } = S.point; S.spots = null; S.spotsBusy = true; renderSheet();
+  try {
+    for (const R of [5000, 12000]) { // si en 5 km no hay nada libre, amplío a 12 km
+    const b = L.latLng(lat, lng).toBounds(R * 2), r = await fetchZones(b, R > 6000 ? 0.001 : 0.0003);
+    if (r.failed) throw new Error('enaire');
+    const feats = mkFeats(r.feats), { cells, nx, ny } = freeCells(b, 40, feats, S.elev), at = (i, j) => cells[i * ny + j];
+    const ok = c => { for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) { const n = (c.i + di >= 0 && c.i + di < nx && c.j + dj >= 0 && c.j + dj < ny) ? at(c.i + di, c.j + dj) : null; if (n && !n.free) return false; } return c.free; };
+    const cand = cells.filter(ok).map(c => ({ lat: c.lat, lng: c.lng, dist: haversine(lat, lng, c.lat, c.lng), dir: bearing(lat, lng, c.lat, c.lng) })).sort((x, y) => x.dist - y.dist);
+    const spots = []; cand.forEach(c => { if (spots.length < 5 && spots.every(s => haversine(s.lat, s.lng, c.lat, c.lng) > 900)) spots.push(c); });
+    S.spots = spots; S.spotsR = R; if (spots.length) break;
+    }
+  } catch { S.spots = []; S.spotsErr = true; }
+  S.spotsBusy = false; drawSpots(); renderSheet();
+}
+function drawSpots() {
+  spotLayer.clearLayers();
+  (S.spots || []).forEach((s, i) => L.marker([s.lat, s.lng], { icon: L.divIcon({ className: '', html: `<div class="spot">${i + 1}</div>`, iconSize: [30, 30], iconAnchor: [15, 15] }) }).on('click', () => goSpot(i)).addTo(spotLayer));
+}
+function goSpot(i) { const s = S.spots[i]; if (s) { const keep = S.spots; setPoint(s.lat, s.lng, `Sitio libre ${i + 1}`, true).then(() => { S.spots = keep; drawSpots(); }); } }
 function setSheetTall(v) { S.sheetTall = v; $('#sheet').classList.toggle('tall', v); }
 function locate() {
   if (!navigator.geolocation) return toast('Tu navegador no permite usar la ubicación');
-  toast('Buscando tu ubicación…');
+  toast('Buscando tu ubicación GPS…');
   navigator.geolocation.getCurrentPosition(p => setPoint(p.coords.latitude, p.coords.longitude, 'Mi ubicación', true, p.coords.accuracy),
-    e => toast(e.code === 1 ? 'Permiso de ubicación denegado. Actívalo en el navegador o busca el lugar a mano.' : 'No he podido obtener tu ubicación. Prueba al aire libre o busca el lugar.'),
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+    e => toast(e.code === 1 ? 'Ubicación bloqueada. Permítela en el navegador (candado de la barra) o busca el lugar a mano.' : 'No he podido obtener tu GPS. Prueba al aire libre o busca el lugar.'),
+    { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
 }
 async function search(q) {
   q = q.trim(); if (!q) return;

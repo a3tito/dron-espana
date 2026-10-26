@@ -1,5 +1,5 @@
-const CACHE = 'dron-espana-v1';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './icon.svg',
+const CACHE = 'dron-espana-v2';
+const SHELL = ['./', './index.html', './styles.css', './app.js', './ui.js', './data.js', './rules.json', './manifest.webmanifest', './icon.svg',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js'];
 

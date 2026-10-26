@@ -33,16 +33,51 @@ const KIND_HELP = {
 };
 const KIND_ICON = { planea: '🛰️', aena: '✈️', defensa: '🪖', cecaf: '📷', adif: '🚆', aesa: '🏛️', aerodromo: '✈️', helipuerto: '🚁', otro: '📨' };
 
-function profileChecks() {
-  const P = DB.profile, R = reglasDron(P), out = [];
+/* ¿Tu carné cubre la subcategoría de este dron? (el A2 incluye el A1/A3) */
+const certCubre = (c, R) => !R.cert || (R.sub === 'A2' ? c === 'a2' : ['a1a3', 'a2', 'sts'].includes(c));
+function profileChecks(d = activeDrone()) {
+  const P = profWith(d), R = d ? reglasDron(d) : null, out = [];
   if (!R) return { R: null, items: [] };
-  out.push([!!P.droneName || !!P.droneG, `Tu dron: <b>${esc(P.droneName || 'sin nombre')}</b> (${R.g || '?'} g) → ${R.subTxt}`]);
-  if (S.height > 120) out.push([false, `Has elegido ${S.height} m: el máximo en categoría abierta es <b>120 m</b>.`]);
-  if (R.registro) out.push([!!P.operatorId, P.operatorId ? `Registro de operador AESA: <b>${esc(P.operatorId)}</b>` : 'Te falta tu <b>número de operador AESA</b> (obligatorio para tu dron).']);
-  const certOk = !R.cert || (P.pilotCert && P.pilotCert !== 'none');
+  out.push([true, `<b>${esc(d.droneName || 'Tu dron')}</b> (${R.g} g) → ${R.subTxt}`]);
+  if (S.height > RULES.maxHeight) out.push([false, `Has elegido ${S.height} m: el máximo en categoría abierta es <b>${RULES.maxHeight} m</b>.`]);
+  if (R.registro) out.push([!!P.operatorId, P.operatorId ? `Registro de operador AESA: <b>${esc(P.operatorId)}</b>` : 'Te falta tu <b>número de operador AESA</b> (obligatorio para este dron; es gratis).']);
+  const certOk = certCubre(P.pilotCert, R);
   out.push([certOk, R.cert ? (certOk ? `Carné: <b>${esc(certLabel(P.pilotCert))}</b>` : `Te falta el carné: ${R.certTxt}`) : R.certTxt]);
-  out.push([!!P.insurer && !!P.policy, P.policy ? `Seguro: <b>${esc(P.insurer)}</b> · ${esc(P.policy)}` : 'Falta tu <b>seguro</b> de responsabilidad civil (las autoridades lo piden en las solicitudes).']);
+  if (R.seguro) out.push([!!P.policy, P.policy ? `Seguro: <b>${esc(P.insurer || '')}</b> · ${esc(P.policy)}` : `Te falta el <b>seguro</b>: ${R.seguroTxt}`]);
+  else out.push([true, `Seguro: <b>no obligatorio</b> en ${R.sub}${P.policy ? ` (ya tienes ${esc(P.insurer || 'uno')})` : ''}.`]);
+  R.notas.forEach(n => out.push([false, esc(n)]));
   return { R, items: out };
+}
+/* Qué puedes hacer con CADA dron en este punto, a esta altura y con este tiempo */
+function droneVerdict(d, ev) {
+  const R = reglasDron(d), P = profWith(d);
+  if (!R) return { ico: '❓', t: 'Falta el peso del dron', ok: false, lines: [] };
+  const lines = [], bad = [], warn = [];
+  const urbanLikely = S.urban === 'si' || (S.urban === 'auto' && /casco urbano/i.test(S.urbanHint || ''));
+  if (S.height > RULES.maxHeight) bad.push(`${S.height} m supera el máximo de ${RULES.maxHeight} m`);
+  if (R.registro && !P.operatorId) bad.push('te falta el registro de operador (AESA)');
+  if (!certCubre(P.pilotCert, R)) bad.push('te falta el carné de piloto que exige');
+  if (R.seguro && !P.policy) bad.push('te falta el seguro (obligatorio en A2)');
+  if (R.sub === 'A3' && urbanLikely) bad.push(`A3 exige estar a ${RULES.distA3} m de zonas urbanas`);
+  if (R.sub === 'A2' && urbanLikely) warn.push(`A2: mantén ${RULES.distA2} m de personas ajenas`);
+  const w = wxAssess(d); if (w && !w.none) { if (w.level === 'stop') bad.push(`el viento supera su límite (${w.maxW} m/s)`); else if (w.level === 'warn') warn.push(w.notes.join('; ')); }
+  R.notas.forEach(n => warn.push(n));
+  const zona = ev ? (ev.rank >= 3 ? ['⛔', 'vuelo prohibido aquí'] : ev.rank === 2 ? ['🛂', ev.freeUpTo >= 10 ? `permiso necesario por encima de ${ev.freeUpTo} m` : 'necesita permiso'] : ev.rank === 1 ? ['⚠️', 'con condiciones'] : ev.urbanPending ? ['🏘️', 'depende de si es casco urbano'] : ['✅', 'zona libre']) : ['❓', 'sin comprobar'];
+  const ico = ev?.rank >= 3 || bad.length ? '⛔' : ev?.rank === 2 ? '🛂' : warn.length || ev?.rank === 1 || ev?.urbanPending ? '⚠️' : '✅';
+  return { ico, zona, bad, warn, R, d, t: ico === '⛔' ? 'No puedes volarlo aquí ahora' : ico === '🛂' ? 'Puedes, con permiso' : ico === '⚠️' ? 'Puedes, con cuidado' : 'Puedes volarlo' };
+}
+function dronesHtml(ev) {
+  if (!DB.drones.length) return `<div class="card"><p style="margin:0 0 8px">Añade tus drones (puedes tener varios) y te digo qué puedes hacer con cada uno aquí.</p><button class="btn" data-act="nav" data-v="profile">Añadir mis drones</button></div>`;
+  const act = activeDrone();
+  return DB.drones.map(d => {
+    const v = droneVerdict(d, ev), cls = v.ico === '✅' ? 'ok' : v.ico === '⛔' ? 'stop' : 'warn';
+    if (!v.R) return `<div class="card warn"><h3>❓ ${esc(d.droneName || 'Dron')}</h3><p class="small muted" style="margin:0">Indica su peso en Mi perfil.</p></div>`;
+    return `<div class="card ${cls}"><h3>${v.ico} ${esc(d.droneName || 'Dron')} <span class="muted small">· ${v.R.sub} · ${v.R.g} g</span></h3>
+      <div class="tags"><span class="tag ${cls === 'ok' ? 'green' : cls === 'stop' ? 'red' : 'amber'}">${v.t}</span><span class="tag">${v.zona[0]} ${esc(v.zona[1])}</span>${act && act.id === d.id ? '<span class="tag green">Dron activo</span>' : ''}</div>
+      ${v.bad.length ? `<ul style="margin:6px 0">${v.bad.map(b => `<li>❌ ${esc(b)}</li>`).join('')}</ul>` : ''}${v.warn.length ? `<ul style="margin:6px 0">${v.warn.map(b => `<li>⚠️ ${esc(b)}</li>`).join('')}</ul>` : ''}
+      <details><summary>Reglas de este dron</summary><ul class="small"><li>${esc(v.R.registroTxt)}</li><li>${esc(v.R.certTxt)}</li><li>${esc(v.R.seguroTxt)}</li><li>${esc(v.R.edadTxt)}</li>${v.R.limites.map(l => `<li>${esc(l)}</li>`).join('')}</ul></details>
+      ${act && act.id === d.id ? '' : `<button class="btn sec sm" data-act="dr-act" data-id="${d.id}">Usar este para mis solicitudes</button>`}</div>`;
+  }).join('');
 }
 const certLabel = c => ({ a1a3: 'A1/A3', a2: 'A2', sts: 'Categoría específica (STS)', none: 'Sin carné' }[c] || 'Sin indicar');
 
@@ -116,9 +151,47 @@ function checkHtml() {
   return `<div class="card"><h3>🧾 Antes de despegar</h3>${PRE_FLIGHT.map(([k, t]) => `<label class="chk"><input type="checkbox" data-chk="${k}" ${DB.checks[k] ? 'checked' : ''}><span>${esc(t)}${k === 'notam' ? ` — <a target="_blank" rel="noopener" href="${ENLACES.enaireDrones}">ENAIRE Drones</a>` : ''}</span></label>`).join('')}</div>`;
 }
 
+/* Resumen claro: qué se puede hacer aquí y bajo qué condiciones, todo en una lista de ✅ ⚠️ ❌ */
+function summaryHtml(ev, v) {
+  const { R, items } = profileChecks(), P = DB.profile, rows = [], w = wxAssess();
+  const go = (ico, t) => rows.push(`<div class="chk"><span>${ico}</span><span>${t}</span></div>`);
+  if (ev.rank >= 3) go('⛔', '<b>Vuelo prohibido</b> a esta altura en este punto.');
+  else if (ev.rank === 2) go('🛂', `<b>A ${S.height} m necesitas permiso.</b> ${ev.freeUpTo >= 10 ? `Sin permiso solo puedes volar <b>hasta ${ev.freeUpTo} m</b>.` : 'No hay altura libre aquí.'}`);
+  else if (ev.rank === 1) go('⚠️', '<b>Puedes volar con condiciones</b> (avisar o comprobar con el titular).');
+  else if (ev.urbanPending) go('🏘️', '<b>Falta un dato:</b> dime si estás dentro de un pueblo o ciudad (arriba).');
+  else go('✅', `<b>Sin zonas de ENAIRE a ${S.height} m.</b> Puedes volar siguiendo las normas generales.`);
+  ev.groups.forEach(g => { const d = duracionISO(g.interval); go(g.rank >= 2 ? '📨' : '📣', `<b>${esc(g.name)}</b>: ${g.rank >= 2 ? 'pedir autorización' : 'avisar / revisar condiciones'}${d ? ` con ${esc(d)} de antelación` : ''}.`); });
+  if (S.urban === 'si') go('🏘️', 'Estás en <b>casco urbano</b>: hace falta autorización (ver AESA).');
+  if (R) {
+    go('📏', `Máximo <b>120 m</b>, siempre a la vista. ${esc(R.subTxt)}.`);
+    items.filter(([ok]) => !ok).forEach(([, t]) => go('❌', t));
+  } else go('👤', 'Configura tu dron en <b>Mi perfil</b> para saber qué carné y registro necesitas.');
+  if (w && !w.none) go(w.level === 'ok' ? '🌤️' : w.level === 'warn' ? '🌥️' : '🌧️', w.level === 'ok' ? 'El tiempo acompaña a esa hora.' : esc(w.notes.join('. ') + '.'));
+  return `<div class="card ${v.cls === 'v-ok' ? 'ok' : v.cls === 'v-stop' ? 'stop' : 'warn'}"><h3>📋 En resumen</h3>${rows.join('')}</div>`;
+}
+/* Corte vertical: qué zona afecta a qué altura (0–150 m) y dónde está tu vuelo */
+function profileSvg(ev) {
+  const zs = ev.zones.filter(z => z.valid && z.rank >= 1 && z.layer !== 'urbano' && z.loA != null).slice(0, 6);
+  if (!zs.length) return '';
+  const H = 150, top = 14, bot = 150, x0 = 38, W = 320, ch = bot - top, y = m => bot - Math.min(m, H) / H * ch, cw = (W - x0 - 4) / zs.length;
+  const grid = [0, 30, 60, 90, 120, 150].map(m => `<line x1="${x0}" x2="${W}" y1="${y(m)}" y2="${y(m)}" stroke="currentColor" opacity=".15"/><text x="${x0 - 4}" y="${y(m) + 3}" font-size="9" text-anchor="end" fill="currentColor" opacity=".7">${m}</text>`).join('');
+  const bars = zs.map((z, i) => { const lo = Math.max(0, z.loA), up = Math.min(H, z.upA ?? H), col = ZCOL[z.p.type] || '#888', bx = x0 + i * cw + 4; return `<rect x="${bx}" y="${y(up)}" width="${cw - 8}" height="${Math.max(2, y(lo) - y(up))}" rx="3" fill="${col}" opacity=".85"><title>${esc(z.title)}: ${esc(vertTxt(z))}</title></rect><text x="${bx + (cw - 8) / 2}" y="${bot + 11}" font-size="8" text-anchor="middle" fill="currentColor">${esc(z.title.replace(/^(MADRID|BARCELONA)\//i, '').slice(0, 11))}</text>`; }).join('');
+  return `<div class="card"><h3>📐 A qué altura afecta cada zona</h3>
+    <svg viewBox="0 0 ${W} 172" width="100%" role="img" aria-label="Corte vertical de zonas">${grid}<rect x="${x0}" y="${y(120)}" width="${W - x0}" height="${y(0) - y(120)}" fill="#2fbf5b" opacity=".07"/>${bars}
+      <line x1="${x0}" x2="${W}" y1="${y(S.height)}" y2="${y(S.height)}" stroke="#0b3d91" stroke-width="2" stroke-dasharray="5 3"/><text x="${W - 2}" y="${y(S.height) - 3}" font-size="9" text-anchor="end" font-weight="700" fill="#0b3d91">tu vuelo: ${S.height} m</text></svg>
+    <p class="small muted" style="margin:0">Metros sobre el suelo. Las barras de color son zonas; el hueco verde claro es altura libre.</p></div>`;
+}
+function spotsHtml() {
+  if (S.spotsBusy) return '<div class="card"><span class="spin"></span>Buscando sitios libres cerca de ti…</div>';
+  if (S.spots === null) return `<div class="card"><h3>🟢 ¿Dónde sí puedo volar cerca?</h3><p class="muted" style="margin:0 0 8px">Busco los sitios más cercanos en un radio de 5 km donde ENAIRE no marca ninguna zona a ${S.height} m.</p><button class="btn block" data-act="recommend">🔎 Buscar sitios libres cerca</button></div>`;
+  if (!S.spots.length) return `<div class="card warn"><h3>🟢 Sitios libres</h3><p style="margin:0">${S.spotsErr ? 'No he podido consultar ENAIRE ahora. Inténtalo otra vez.' : `No he encontrado sitios libres a ${S.height} m en ${S.spotsR ? S.spotsR / 1000 : 5} km. Prueba con otra altura (más baja) o desplázate a otra zona.`}</p><div class="actions"><button class="btn sec" data-act="recommend">Reintentar</button></div></div>`;
+  return `<div class="card ok"><h3>🟢 Sitios libres cerca (a ${S.height} m, en ${S.spotsR / 1000} km)</h3>${S.spots.map((s, i) => `<div class="copyrow"><div><div class="v">${i + 1} · a ${fmtDist(s.dist)} al ${s.dir}</div><div class="k">${coordTxt(s.lat, s.lng)}</div></div><div class="actions" style="margin:0"><button class="btn sm" data-act="spot" data-i="${i}">Comprobar</button><a class="btn sec sm" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}">🧭 Ir</a></div></div>`).join('')}
+    <p class="small muted" style="margin:8px 0 0">Libre = sin zonas de ENAIRE con margen. Puede ser casco urbano, propiedad privada o tener otras limitaciones: pulsa «Comprobar» y revisa el mapa en satélite.</p></div>`;
+}
+
 function idleHtml() {
   const { R, items } = profileChecks();
-  return `<div class="verdict v-idle"><div class="big">🛩️</div><div><h2>¿Dónde quieres volar?</h2><p>Toca el mapa, busca un sitio o usa tu ubicación. Te digo en 5 segundos si puedes volar y qué permisos pedir.</p></div></div>
+  return novHtml() + `<div class="verdict v-idle"><div class="big">🛩️</div><div><h2>¿Dónde quieres volar?</h2><p>Toca el mapa, busca un sitio o usa tu ubicación. Te digo en 5 segundos si puedes volar y qué permisos pedir.</p></div></div>
     <div class="actions"><button class="btn block" data-act="locate">📍 Estoy aquí: comprobar mi ubicación</button></div>
     ${R ? `<div class="card" style="margin-top:12px"><h3>👤 Tu perfil</h3>${items.map(([ok, t]) => `<div class="chk"><span>${ok ? '✅' : '❌'}</span><span>${t}</span></div>`).join('')}</div>`
       : `<div class="card" style="margin-top:12px"><h3>👤 Configura tu dron y tus datos</h3><p class="muted" style="margin:0 0 8px">Con eso te digo qué carné necesitas y relleno las solicitudes por ti.</p><button class="btn" data-act="nav" data-v="profile">Configurar (1 minuto)</button></div>`}
@@ -138,13 +211,15 @@ function renderSheet() {
       <label class="f full ${S.urban === 'auto' && S.ev?.urbanPending ? 'need' : ''}">¿Estás dentro de un pueblo o ciudad (casco urbano)?<select data-ctl="urban">${[['auto', 'No lo he comprobado'], ['no', 'No, estoy en campo abierto'], ['si', 'Sí, en casco urbano']].map(([v, t]) => `<option value="${v}" ${S.urban === v ? 'selected' : ''}>${t}</option>`).join('')}</select>${S.urbanHint ? `<span class="small">💡 ${esc(S.urbanHint)}</span>` : ''}</label>
     </div></div>`;
   if (S.loading) { el.innerHTML = ctl + '<div class="card"><span class="spin"></span>Consultando ENAIRE, el terreno y el tiempo…</div>'; return; }
-  let h = ctl + `<div class="verdict ${v.cls}"><div class="big">${v.ico}</div><div><h2>${v.t}</h2><p>${v.d}</p></div></div>`;
+  let h = novHtml() + ctl +`<div class="verdict ${v.cls}"><div class="big">${v.ico}</div><div><h2>${v.t}</h2><p>${v.d}</p></div></div>`;
   if (S.failed.length) h += `<div class="actions" style="margin:-4px 0 10px"><button class="btn danger" data-act="retry">🔄 Reintentar consulta</button></div>`;
   if (ev && ev.ignored) h += `<p class="small muted" style="margin:-4px 0 10px">${ev.ignored} zona(s) cercana(s) no te afectan a ${S.height} m (están por encima o fuera de fecha).</p>`;
 
-  h += '<h2 style="margin:6px 0 8px">Paso 1 · Tú y tu dron</h2>';
-  h += R ? `<div class="card">${items.map(([ok, t]) => `<div class="chk"><span>${ok ? '✅' : '❌'}</span><span>${t}</span></div>`).join('')}
-        <details><summary>Reglas de tu categoría</summary><ul>${R.limites.map(l => `<li>${esc(l)}</li>`).join('')}</ul></details>
+  if (ev) h += summaryHtml(ev, v) + profileSvg(ev);
+  h += `<h2 style="margin:6px 0 8px">Paso 1 · ${DB.drones.length > 1 ? 'Qué puedes hacer con cada uno de tus drones' : 'Tú y tu dron'}</h2>`;
+  if (DB.drones.length > 1) h += dronesHtml(ev) + '<div class="actions" style="margin:0 0 6px"><button class="btn sec sm" data-act="nav" data-v="profile">Editar mis drones y mi perfil</button></div>';
+  else h += R ? `<div class="card">${items.map(([ok, t]) => `<div class="chk"><span>${ok ? '✅' : '❌'}</span><span>${t}</span></div>`).join('')}
+        <details><summary>Reglas de tu categoría</summary><ul class="small"><li>${esc(R.registroTxt)}</li><li>${esc(R.seguroTxt)}</li><li>${esc(R.edadTxt)}</li>${R.limites.map(l => `<li>${esc(l)}</li>`).join('')}</ul></details>
         <button class="btn sec sm" data-act="nav" data-v="profile">Editar mi perfil</button></div>`
     : `<div class="card"><p style="margin:0 0 8px">Dime qué dron tienes y quién eres y te digo qué carné y registro necesitas.</p><button class="btn" data-act="nav" data-v="profile">Configurar mi perfil</button></div>`;
 
@@ -155,8 +230,9 @@ function renderSheet() {
   } else if (ev) h += '<div class="card ok"><h3>✅ No tienes que pedir permiso a nadie aquí</h3><p class="muted" style="margin:0">Ninguna zona de ENAIRE te afecta a esa altura. Cumple las normas generales de abajo.</p></div>';
 
   h += '<h2 style="margin:14px 0 8px">Paso 3 · Tiempo</h2>' + wxHtml();
-  h += '<h2 style="margin:14px 0 8px">Paso 4 · Aeropuertos y helipuertos cerca (con teléfono)</h2>' + nearbyHtml();
-  h += '<h2 style="margin:14px 0 8px">Paso 5 · Antes de despegar</h2>' + checkHtml();
+  h += '<h2 style="margin:14px 0 8px">Paso 4 · Dónde sí puedes volar</h2>' + spotsHtml();
+  h += '<h2 style="margin:14px 0 8px">Paso 5 · Aeropuertos y helipuertos cerca (con teléfono)</h2>' + nearbyHtml();
+  h += '<h2 style="margin:14px 0 8px">Paso 6 · Antes de despegar</h2>' + checkHtml();
 
   if (ev && ev.active.length) h += `<details style="margin-top:12px"><summary>Ver todas las zonas que te afectan (${ev.active.length})</summary>${ev.active.map(z => `<div class="card"><h3>${esc(z.title)}</h3><div class="tags"><span class="tag ${z.rank >= 2 ? 'red' : 'amber'}">${({ REQ_AUTHORIZATION: 'Requiere autorización', CONDITIONAL: 'Condicionada', PROHIBITED: 'Prohibido' })[z.type] || esc(z.type)}</span><span class="tag">${LAYERS[z.layer].label}</span>${z.schedule ? '<span class="tag amber">Con horario o vigencia especial</span>' : ''}</div><p class="small muted" style="margin:4px 0">${esc(vertTxt(z))}</p></div>`).join('')}</details>`;
   h += `<details style="margin-top:8px"><summary>Normas que SIEMPRE aplican</summary><ul class="small"><li>Máximo 120 m sobre el suelo.</li><li>Siempre a la vista, de día y con buena visibilidad.</li><li>No sobrevolar multitudes, ni vuelo sobre personas ajenas sin cumplir tu subcategoría.</li><li>Respeta la privacidad: no grabes a personas identificables sin motivo.</li><li>Una zona libre en el mapa no te exime de cumplir la normativa. Consulta la <a target="_blank" rel="noopener" href="${ENLACES.aesa}">web de AESA</a>.</li></ul></details>
@@ -177,7 +253,7 @@ const snapshot = g => ({ key: g.key, name: g.name, kind: g.kind, emails: g.email
 const groupByKey = k => S.ev?.groups.find(g => g.key === k);
 
 function reqFields(r) {
-  const P = DB.profile, R = reglasDron(P), f = r.flight, p = r.place;
+  const dr = droneFor(r), P = profWith(dr), R = dr ? reglasDron(dr) : null, f = r.flight, p = r.place;
   return [
     ['Solicitante', [['Nombre y apellidos', P.fullName], ['DNI / NIE', P.idDoc], ['Empresa (si procede)', P.company], ['Teléfono de contacto', P.phone], ['Email', P.email]]],
     ['Operador y piloto', [['Nº de operador AESA', P.operatorId], ['Certificado de piloto', P.pilotCert && P.pilotCert !== 'none' ? `${certLabel(P.pilotCert)}${P.pilotCertId ? ' · nº ' + P.pilotCertId : ''}` : 'Sin indicar']]],
@@ -185,13 +261,22 @@ function reqFields(r) {
     ['Seguro de responsabilidad civil', [['Aseguradora', P.insurer], ['Nº de póliza', P.policy], ['Vigencia hasta', P.insExpiry ? fmtDate(P.insExpiry) : '']]],
     ['Operación', [['Finalidad', f.purpose], ['Descripción', f.desc || `Vuelo ${f.purpose.toLowerCase()} con ${P.droneName || 'dron'}, en VLOS, siguiendo las condiciones de la zona.`], ['Fecha', fmtDate(f.date)], ['Horario (hora local)', `${f.from} – ${f.to}`], ['Altura máxima sobre el suelo', `${f.height} m`], ['Radio de la zona de operación', `${f.radius} m`], ['Línea de vista (VLOS)', f.vlos ? 'Sí, siempre a la vista' : 'No'], ['Observadores', String(f.observers || 0)]]],
     ['Ubicación', [['Lugar', p.label || 'Punto elegido en el mapa'], ['Coordenadas (WGS84)', coordTxt(p.lat, p.lng)], ['Coordenadas (grados)', `${dms(p.lat, 'N', 'S')} ${dms(p.lng, 'E', 'O')}`], ['Mapa', gmaps(p.lat, p.lng)], ['Zona(s) afectada(s)', r.group.zones.map(z => z.title).filter(uniq).join('; ')]]],
-  ].map(([t, rows]) => [t, rows.filter(([, v]) => v !== '' && v != null)]);
+  ].map(([t, rows]) => [t, rows.filter(([, v]) => v !== '' && v != null)]).filter(([, rows]) => rows.length);
+}
+const droneFor = r => DB.drones.find(d => d.id === r?.droneId) || activeDrone();
+/* Documentos que de verdad hacen falta (el seguro solo si es obligatorio para ese dron o si ya tienes uno) */
+function docsNeeded(r) {
+  const dr = droneFor(r), R = dr ? reglasDron(dr) : null, P = profWith(dr), out = [];
+  if (!R || R.registro) out.push(['registro', 'Registro de operador AESA']);
+  if (!R || R.cert) out.push(['carnet', 'Certificado de piloto']);
+  if (!R || R.seguro || P.policy) out.push(['seguro', 'Póliza y recibo del seguro']);
+  return out;
 }
 function missingFields(r) {
-  const P = DB.profile, R = reglasDron(P), m = [];
+  const dr = droneFor(r), P = profWith(dr), R = dr ? reglasDron(dr) : null, m = [];
   if (!P.fullName) m.push('tu nombre'); if (!P.phone) m.push('tu teléfono'); if (!P.email) m.push('tu email');
-  if (!P.droneName && !P.droneG) m.push('tu dron'); if (R?.registro && !P.operatorId) m.push('nº de operador AESA');
-  if (R?.cert && (!P.pilotCert || P.pilotCert === 'none')) m.push('tu carné de piloto'); if (!P.policy) m.push('tu seguro');
+  if (!dr) m.push('tu dron'); if (R?.registro && !P.operatorId) m.push('nº de operador AESA');
+  if (R && !certCubre(P.pilotCert, R)) m.push('tu carné de piloto'); if (R?.seguro && !P.policy) m.push('tu seguro (obligatorio en A2)');
   return m;
 }
 function buildEmail(r) {
@@ -199,7 +284,7 @@ function buildEmail(r) {
   const tipo = g.kind === 'cecaf' ? 'los condicionantes técnicos' : g.kind === 'adif' ? 'la autorización/notificación' : 'la coordinación';
   const subject = `Solicitud de ${tipo} para operación UAS – ${zonas.slice(0, 70)} – ${fmtDate(f.date)}`;
   const sect = reqFields(r).map(([t, rows]) => `${t.toUpperCase()}\n${rows.map(([k, v]) => `- ${k}: ${v}`).join('\n')}`).join('\n\n');
-  const body = `Buenos días:\n\nMe dirijo a ustedes para solicitar ${tipo} de una operación con aeronave no tripulada (UAS) en ${r.place.label || 'la ubicación indicada'}, dentro de la zona geográfica: ${zonas}.\n\nLos datos de la operación son los siguientes:\n\n${sect}\n\nAdjunto la documentación necesaria (registro de operador, certificado de piloto, póliza de seguro y croquis de la zona). Quedo a su disposición para cualquier aclaración o para ajustar las condiciones de la operación.\n\nUn saludo,\n${P.fullName || '[Tu nombre]'}\n${P.phone ? 'Tel. ' + P.phone : ''}`;
+  const body = `Buenos días:\n\nMe dirijo a ustedes para solicitar ${tipo} de una operación con aeronave no tripulada (UAS) en ${r.place.label || 'la ubicación indicada'}, dentro de la zona geográfica: ${zonas}.\n\nLos datos de la operación son los siguientes:\n\n${sect}\n\nAdjunto la documentación necesaria (${docsNeeded(r).map(([, t]) => t.toLowerCase()).join(', ')} y croquis de la zona). Quedo a su disposición para cualquier aclaración o para ajustar las condiciones de la operación.\n\nUn saludo,\n${P.fullName || '[Tu nombre]'}\n${P.phone ? 'Tel. ' + P.phone : ''}`;
   return { subject, body };
 }
 const MAILTO_MAX = 1900; // muchos clientes de correo recortan los enlaces mailto más largos
@@ -210,7 +295,7 @@ function mailtoHref(r) {
   const skip = new Set(['Coordenadas (grados)', 'Clase / etiqueta', 'Nº de serie', 'Categoría de operación', 'DNI / NIE', 'Empresa (si procede)', 'Vigencia hasta', 'Observadores']);
   const compact = `Buenos días:\n\nSolicito la coordinación de una operación UAS en ${r.place.label || 'la ubicación indicada'} (${r.group.zones.map(z => z.title).filter(uniq).join('; ')}).\n\n` +
     reqFields(r).flatMap(([, rows]) => rows).filter(([k]) => !skip.has(k)).map(([k, v]) => `${k}: ${v}`).join('\n') +
-    `\n\nAdjunto registro de operador, certificado de piloto, seguro y croquis. Un saludo,\n${DB.profile.fullName || ''}`;
+    `\n\nAdjunto ${docsNeeded(r).map(([, t]) => t.toLowerCase()).join(', ')} y croquis. Un saludo,\n${DB.profile.fullName || ''}`;
   href = mk(compact); if (href.length <= MAILTO_MAX) return href;
   return mk(compact.slice(0, 700) + '\n[…] Ficha completa en el PDF adjunto.\n' + (DB.profile.fullName || ''));
 }
@@ -227,7 +312,7 @@ function printRequest(r) {
   $('#printDoc').innerHTML = `<h1>Solicitud de ${r.group.kind === 'adif' ? 'autorización' : 'coordinación'} de operación con aeronave no tripulada (UAS)</h1>
     <p>Dirigida a: <b>${esc(r.group.name)}</b>${r.group.emails.length ? ' · ' + esc(r.group.emails.join(', ')) : ''}<br>Fecha de la solicitud: ${new Date().toLocaleDateString('es-ES')} · Fecha prevista del vuelo: ${fmtDate(f.date)}</p>
     ${reqFields(r).map(([t, rows]) => `<h2>${esc(t)}</h2><table>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>`).join('')}
-    <h2>Documentación que se adjunta</h2><p>☐ Registro de operador AESA &nbsp; ☐ Certificado de piloto &nbsp; ☐ Póliza y recibo del seguro &nbsp; ☐ Croquis / mapa de la zona</p>
+    <h2>Documentación que se adjunta</h2><p>${[...docsNeeded(r).map(([, t]) => t), 'Croquis / mapa de la zona'].map(t => '☐ ' + esc(t)).join(' &nbsp; ')}</p>
     <p style="margin-top:28pt">Firma: ____________________________ &nbsp; ${esc(P.fullName || '')}</p>`;
   setTimeout(() => window.print(), 80);
 }
@@ -257,6 +342,7 @@ function renderReq(el, r) {
 
     <h2>1 · Datos del vuelo</h2>
     <div class="form">${field('flight.date', 'Fecha', 'date')}${field('flight.height', 'Altura máx. (m)', 'number')}${field('flight.from', 'Desde (hora local)', 'time')}${field('flight.to', 'Hasta (hora local)', 'time')}${field('flight.radius', 'Radio de la operación (m)', 'number')}${field('flight.observers', 'Observadores', 'number')}
+      ${DB.drones.length ? `<label class="f full"><span>Dron para este vuelo</span><select data-rb="droneId">${DB.drones.map(d => `<option value="${d.id}" ${droneFor(r)?.id === d.id ? 'selected' : ''}>${esc(d.droneName || 'Dron')} · ${d.droneG || '?'} g</option>`).join('')}</select></label>` : ''}
       <label class="f full"><span>Finalidad</span><select data-rb="flight.purpose">${FINALIDADES.map(x => `<option ${x === f.purpose ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
       <label class="f full"><span>Descripción de lo que vas a hacer (opcional: si lo dejas vacío pongo una frase estándar)</span><textarea data-rb="flight.desc">${esc(f.desc)}</textarea></label></div>
 
@@ -274,7 +360,7 @@ function renderReq(el, r) {
     <div class="card">${reqFields(r).map(([t, rows]) => `<div class="small muted" style="margin-top:8px"><b>${esc(t)}</b></div>${rows.map(([k, v]) => `<div class="copyrow"><div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div><button class="btn sec sm" data-act="copy" data-t="${esc(v)}">Copiar</button></div>`).join('')}`).join('')}</div>
 
     <h2>4 · Documentos que debes adjuntar</h2>
-    <div class="card">${[['carnet', 'Certificado de piloto'], ['registro', 'Registro de operador AESA'], ['seguro', 'Póliza y recibo del seguro'], ['croquis', 'Croquis de la zona (el PDF ya lleva el mapa)']].map(([k, t]) => { const d = DB.docs.find(x => x.type === k); return `<div class="chk"><span>${d ? '✅' : '⬜'}</span><span>${t} ${d ? `<button class="btn sec sm" data-act="docview" data-id="${d.id}">Ver foto</button>` : k !== 'croquis' ? '<span class="muted small">— súbela en Mi perfil → Cartera</span>' : ''}</span></div>`; }).join('')}
+    <div class="card">${[...docsNeeded(r), ['croquis', 'Croquis de la zona (el PDF ya lleva el mapa)']].map(([k, t]) => { const d = DB.docs.find(x => x.type === k); return `<div class="chk"><span>${d ? '✅' : '⬜'}</span><span>${t} ${d ? `<button class="btn sec sm" data-act="docview" data-id="${d.id}">Ver foto</button>` : k !== 'croquis' ? '<span class="muted small">— súbela en Mi perfil → Cartera</span>' : ''}</span></div>`; }).join('')}
       <p class="small muted" style="margin:6px 0 0">Si despegas desde terreno privado o espacio público acotado, añade el permiso del propietario o del ayuntamiento.</p></div>
 
     <h2>5 · Seguimiento</h2>
@@ -284,14 +370,34 @@ function renderReq(el, r) {
 
 /* ========================= PERFIL ========================= */
 function pfield(k, label, type = 'text', ph = '', extra = '') { return `<label class="f ${extra}"><span>${label}</span><input type="${type}" data-pb="${k}" value="${esc(DB.profile[k] ?? '')}" placeholder="${esc(ph)}" autocomplete="off"></label>`; }
+const PF = { edit: null };
 function profileScore() {
-  const P = DB.profile, R = reglasDron(P), need = [P.fullName, P.phone, P.email, P.droneName || P.droneG, P.policy];
-  if (R?.registro) need.push(P.operatorId); if (R?.cert) need.push(P.pilotCert && P.pilotCert !== 'none' ? 1 : '');
+  const d = activeDrone(), P = profWith(d), R = d ? reglasDron(d) : null, need = [P.fullName, P.phone, P.email, d ? 1 : ''];
+  if (R?.seguro) need.push(P.policy);
+  if (R?.registro) need.push(P.operatorId); if (R) need.push(certCubre(P.pilotCert, R) ? 1 : '');
   return Math.round(need.filter(Boolean).length / need.length * 100);
 }
+/* Un dron: tarjeta con lo que exige y botones; si se está editando, el formulario */
+function droneCard(d) {
+  const R = reglasDron(d), act = activeDrone()?.id === d.id;
+  if (PF.edit === d.id) {
+    const sel = DRONES.find(x => x.id === d.droneModel)?.id || '';
+    const f = (k, label, type = 'text', ph = '', extra = '') => `<label class="f ${extra}"><span>${label}</span><input type="${type}" data-dr="${k}" value="${esc(d[k] ?? '')}" placeholder="${esc(ph)}" autocomplete="off"></label>`;
+    return `<div class="card ok"><h3>✏️ ${esc(d.droneName || 'Nuevo dron')}</h3><div class="form">
+      <label class="f full"><span>Modelo</span><select data-dm="1"><option value="">Elige el modelo…</option>${DRONES.map(x => `<option value="${x.id}" ${sel === x.id ? 'selected' : ''}>${x.name}${x.g ? ' · ' + x.g + ' g' : ''}</option>`).join('')}</select></label>
+      ${f('droneName', 'Nombre del dron', 'text', 'p. ej. Mi Mini 3', 'full')}${f('droneG', 'Peso en gramos (mira la etiqueta)', 'number')}
+      <label class="f"><span>Clase (etiqueta C0–C4)</span><select data-dr="droneClass">${CLASES.map(([v, t]) => `<option value="${v}" ${(d.droneClass || '') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      ${f('droneSerial', 'Nº de serie')}${f('maxWind', 'Viento máx. que aguanta (m/s)', 'number', '10')}
+      <label class="chk full"><input type="checkbox" data-drc="1" ${d.droneCamera !== false ? 'checked' : ''}><span>Lleva cámara u otro sensor</span></label></div>
+      ${R ? `<div class="small"><div class="chk"><span>📋</span><span>${esc(R.registroTxt)}</span></div><div class="chk"><span>🎓</span><span>${esc(R.certTxt)}</span></div><div class="chk"><span>🛡️</span><span>${esc(R.seguroTxt)}</span></div><div class="chk"><span>🎂</span><span>${esc(R.edadTxt)}</span></div>${R.notas.map(n => `<div class="chk"><span>⚠️</span><span>${esc(n)}</span></div>`).join('')}</div>` : ''}
+      <div class="actions"><button class="btn" data-act="dr-done">✔ Listo</button><button class="btn danger" data-act="dr-del" data-id="${d.id}">Borrar este dron</button></div></div>`;
+  }
+  return `<div class="card"><h3>🛩️ ${esc(d.droneName || 'Dron sin nombre')} ${act ? '<span class="tag green">activo</span>' : ''}</h3>
+    <div class="tags"><span class="tag">${R ? R.sub : '?'} · ${d.droneG || '?'} g</span>${d.droneClass ? `<span class="tag">${d.droneClass}</span>` : ''}${R ? `<span class="tag ${R.registro ? 'amber' : 'green'}">${R.registro ? 'Registro necesario' : 'Sin registro'}</span><span class="tag ${R.seguro ? 'amber' : 'green'}">${R.seguro ? 'Seguro obligatorio' : 'Seguro no obligatorio'}</span>` : ''}</div>
+    <div class="actions"><button class="btn sec sm" data-act="dr-edit" data-id="${d.id}">Editar</button>${act ? '' : `<button class="btn sec sm" data-act="dr-act" data-id="${d.id}">Usar por defecto</button>`}</div></div>`;
+}
 function renderProfile() {
-  const P = DB.profile, R = reglasDron(P), sc = profileScore();
-  const sel = DRONES.find(d => d.name === P.droneName)?.id || (P.droneName ? 'otro' : '');
+  const P = DB.profile, sc = profileScore();
   $('#profileBody').innerHTML = `<h1>👤 Mi perfil</h1><p class="lead">Rellénalo una sola vez. Se guarda <b>solo en este móvil</b> y se usa para rellenar tus solicitudes y decirte qué te falta.</p>
     <div class="card"><div class="small">Perfil completo al <b>${sc}%</b></div><div class="meter"><i style="width:${sc}%;${sc < 100 ? 'background:var(--warn)' : ''}"></i></div></div>
 
@@ -302,17 +408,13 @@ function renderProfile() {
       <label class="f"><span>Carné de piloto</span><select data-pb="pilotCert">${[['', 'Elige…'], ['none', 'No tengo'], ['a1a3', 'A1/A3'], ['a2', 'A2'], ['sts', 'Categoría específica (STS)']].map(([v, t]) => `<option value="${v}" ${P.pilotCert === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       ${pfield('pilotCertId', 'Nº de certificado')}${pfield('certExpiry', 'Caduca (los certificados duran 5 años)', 'date', '', 'full')}</div>
 
-    <h2>Tu dron</h2><div class="form">
-      <label class="f full"><span>Modelo</span><select data-pb="droneModel"><option value="">Elige tu dron…</option>${DRONES.map(d => `<option value="${d.id}" ${sel === d.id ? 'selected' : ''}>${d.name}${d.g ? ' · ' + d.g + ' g' : ''}</option>`).join('')}</select></label>
-      ${sel === 'otro' || (P.droneName && !DRONES.find(d => d.name === P.droneName)) ? pfield('droneName', 'Nombre del modelo', 'text', '', 'full') : ''}
-      ${pfield('droneG', 'Peso en gramos (mira la etiqueta)', 'number')}
-      <label class="f"><span>Clase (etiqueta C0–C4)</span><select data-pb="droneClass">${CLASES.map(([v, t]) => `<option value="${v}" ${(P.droneClass || '') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-      ${pfield('droneSerial', 'Nº de serie')}${pfield('maxWind', 'Viento máx. que aguanta (m/s)', 'number', '10')}
-      <label class="chk full"><input type="checkbox" data-pbc="droneCamera" ${P.droneCamera !== false ? 'checked' : ''}><span>Lleva cámara u otro sensor</span></label></div>
-    ${R ? `<div class="card ok"><h3>Con tu dron: ${R.subTxt}</h3><div class="chk"><span>${R.registro ? '📋' : 'ℹ️'}</span><span>${R.registroTxt}</span></div><div class="chk"><span>🎓</span><span>${R.certTxt}</span></div><ul class="small">${R.limites.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
-      <p class="small muted" style="margin:0">Más info: <a target="_blank" rel="noopener" href="${ENLACES.aesaAbierta}">AESA · categoría abierta</a>. Si tu dron tiene etiqueta de clase, ponla arriba para afinar.</p></div>` : ''}
+    <h2>Tus drones</h2><p class="small muted" style="margin-top:0">Puedes tener varios: te digo qué puedes hacer con cada uno en cada sitio. Los pesos son orientativos; manda la etiqueta de tu dron. <a target="_blank" rel="noopener" href="${ENLACES.aesaAbierta}">Normas de AESA</a></p>
+    ${DB.drones.map(droneCard).join('')}
+    <div class="actions"><button class="btn" data-act="dr-add">➕ Añadir un dron</button></div>
 
-    <h2>Tu seguro</h2><div class="form">${pfield('insurer', 'Aseguradora', 'text', '', 'full')}${pfield('policy', 'Nº de póliza')}${pfield('insExpiry', 'Vigencia hasta', 'date')}</div>
+    <h2>Tu seguro <span class="muted small">(opcional salvo en A2)</span></h2>
+    <p class="small muted" style="margin-top:0">${DB.drones.some(d => reglasDron(d)?.seguro) ? 'Alguno de tus drones vuela en A2: ahí el seguro de responsabilidad civil es obligatorio (art. 8 RD 517/2024).' : 'En categoría abierta A1 y A3 (menos de 20 kg) el seguro no es obligatorio (art. 8 RD 517/2024). Rellénalo solo si tienes uno: es recomendable, y obligatorio en A2, categoría específica y certificada.'}</p>
+    <div class="form">${pfield('insurer', 'Aseguradora', 'text', '', 'full')}${pfield('policy', 'Nº de póliza')}${pfield('insExpiry', 'Vigencia hasta', 'date')}</div>
 
     <h2>Cartera de documentos</h2><p class="small muted" style="margin-top:0">Fotos de tus documentos, siempre a mano y sin conexión por si te los pide la Guardia Civil o la Policía. Solo se guardan en este móvil.</p>
     <div class="docs">${DB.docs.map(d => `<div class="doc"><img src="${d.data}" alt="${esc(d.name)}" data-act="docview" data-id="${d.id}"><div><b>${esc(d.name)}</b><br><button class="btn sec sm" data-act="docdel" data-id="${d.id}">Borrar</button></div></div>`).join('')}</div>
@@ -342,7 +444,7 @@ async function liveBoe() {
 }
 async function loadNews(force) {
   if (NEWS.loading || (NEWS.loaded && !force)) return; NEWS.loading = true; renderNews();
-  const [a, b] = await Promise.allSettled([jfetch(NEWS_URL + '?' + Date.now(), { timeout: 12000 }), liveBoe()]);
+  const [a, b] = await Promise.allSettled([jfetch(NEWS_URL + '?' + Date.now(), { timeout: 12000 }).catch(() => jfetch('news.json?' + Date.now(), { timeout: 8000 })), liveBoe()]);
   const items = [...(a.status === 'fulfilled' ? a.value.items : []), ...(b.status === 'fulfilled' ? b.value : [])];
   NEWS.generated = a.status === 'fulfilled' ? a.value.generated : '';
   const seen = new Set(); NEWS.items = items.sort((x, y) => y.date.localeCompare(x.date)).filter(i => { const k = (i.id || i.title).toLowerCase().replace(/\W+/g, '').slice(0, 80); if (seen.has(k)) return false; seen.add(k); return true; });
@@ -372,7 +474,7 @@ function renderGuide() {
     <div class="verdict v-warn"><div class="big">🛂</div><div><h2>Necesitas permiso</h2><p>Hay que pedir autorización o coordinación a alguien antes. La app te dice a quién y lo prepara.</p></div></div>
     <div class="verdict v-stop"><div class="big">⛔</div><div><h2>No vueles</h2><p>Vuelo prohibido a esa altura.</p></div></div>
     <h2>Antes de tu primer vuelo</h2>
-    <div class="card"><ol><li><b>Regístrate como operador en AESA</b> si tu dron lleva cámara o pesa 250 g o más. Te dan un número que pegas en el dron.</li><li><b>Saca el carné</b> si tu dron lo exige (examen online de AESA). Mi perfil te dice cuál.</li><li><b>Contrata un seguro</b> de responsabilidad civil: te lo pedirán en las solicitudes.</li><li><b>Mira esta app</b> antes de cada vuelo: tiempo, zonas y permisos.</li></ol>${L(ENLACES.aesa, 'AESA · Drones')} ${L(ENLACES.aesaAbierta, 'Categoría abierta')}</div>
+    <div class="card"><ol><li><b>Regístrate como operador en AESA</b> si tu dron lleva cámara o pesa 250 g o más. Te dan un número que pegas en el dron.</li><li><b>Saca el carné</b> si tu dron lo exige (examen online de AESA). Mi perfil te dice cuál.</li><li><b>Seguro:</b> el de responsabilidad civil solo es obligatorio en la subcategoría A2 y en la categoría específica o certificada. En A1 y A3 (menos de 20 kg) no lo es, aunque sigue siendo recomendable.</li><li><b>Mira esta app</b> antes de cada vuelo: tiempo, zonas y permisos.</li></ol>${L(ENLACES.aesa, 'AESA · Drones')} ${L(ENLACES.aesaAbierta, 'Categoría abierta')}</div>
     <h2>¿Qué es cada permiso?</h2>
     <div class="card"><details open><summary>🛰️ ENAIRE Planea</summary><p class="small">Plataforma de ENAIRE para pedir la coordinación en espacio aéreo controlado (CTR, ATZ, TMA). En esas zonas están permitidos los vuelos a la vista de hasta 60 m fuera de las zonas de aeródromo; para el resto hay que solicitar.</p></details>
     <details><summary>✈️ Aeropuertos y aeródromos</summary><p class="small">Dentro de la zona de un aeropuerto hay que coordinar con él (AENA o el aeródromo). La app te da su email y teléfono cuando ENAIRE los publica.</p></details>
@@ -382,7 +484,7 @@ function renderGuide() {
     <div class="card"><div class="actions">${L(ENLACES.enaireDrones, 'ENAIRE Drones (mapa)')}${L(ENLACES.planea, 'ENAIRE Planea')}${L(ENLACES.zonasUAS, 'Zonas UAS · AIP')}${L(ENLACES.aenaTramite, 'AENA · trámite UAS')}${L(ENLACES.adif, 'ADIF')}${L(ENLACES.aesaZonas, 'AESA · zonas (PDF)')}</div>
       <div class="copyrow"><div><div class="k">Consultas del servicio de datos de ENAIRE</div><div class="v">${ENLACES.enaireAIS}</div></div><a class="btn sec sm" href="mailto:${ENLACES.enaireAIS}">Escribir</a></div>
       <div class="copyrow"><div><div class="k">Emergencias</div><div class="v">112</div></div><a class="btn danger sm" href="tel:112">Llamar</a></div></div>
-    <h2>Sobre los datos</h2><div class="card small"><p>Las zonas proceden del servicio oficial de datos AIS de <b>ENAIRE</b> (titular de los derechos de sus contenidos), según el RD 517/2024, y se actualizan cada 28 días (ciclo AIRAC). El tiempo viene de Open-Meteo, el terreno y los mapas de OpenStreetMap, y la normativa del BOE y AESA.</p><p><b>Aviso:</b> esta app es una ayuda. No sustituye a la información oficial ni asesoramiento legal, y no puede enviar solicitudes por ti: ENAIRE, AESA y AENA exigen tu identificación. Antes de volar, confirma en las fuentes oficiales.</p></div>`;
+    <h2>Sobre los datos</h2><div class="card small"><p>Las zonas proceden del servicio oficial de datos AIS de <b>ENAIRE</b> (titular de los derechos de sus contenidos), según el RD 517/2024, y se actualizan cada 28 días (ciclo AIRAC). El tiempo viene de Open-Meteo, el terreno y los mapas de OpenStreetMap, y la normativa del BOE y AESA.</p><p><b>Reglas revisadas el ${fmtDate(RULES.reviewed)}.</b> Se actualizan solas al abrir la app y te aviso si el BOE publica una norma nueva sobre drones. Fuentes: ${RULES.refs.map(([t, u]) => `<a target="_blank" rel="noopener" href="${esc(u)}">${esc(t)}</a>`).join(' · ')}.</p><p><b>Aviso:</b> esta app es una ayuda. No sustituye a la información oficial ni asesoramiento legal, y no puede enviar solicitudes por ti: ENAIRE, AESA y AENA exigen tu identificación. Antes de volar, confirma en las fuentes oficiales.</p></div>`;
 }
 
 /* ========================= NAVEGACIÓN Y EVENTOS ========================= */
@@ -406,6 +508,15 @@ document.addEventListener('click', async e => {
   if (act === 'nav') setView(a.dataset.v);
   else if (act === 'locate') locate();
   else if (act === 'retry') analyze();
+  else if (act === 'dr-add') { const d = { id: uid(), droneName: '', droneG: '', droneClass: '', droneCamera: true, droneSerial: '', maxWind: '', droneModel: '' }; DB.drones.push(d); if (!DB.activeDrone) DB.activeDrone = d.id; PF.edit = d.id; dbSave(); renderProfile(); }
+  else if (act === 'dr-edit') { PF.edit = a.dataset.id; renderProfile(); }
+  else if (act === 'dr-done') { PF.edit = null; renderProfile(); renderSheet(); }
+  else if (act === 'dr-act') { DB.activeDrone = a.dataset.id; dbSave(); renderProfile(); renderSheet(); toast('Dron por defecto cambiado'); }
+  else if (act === 'dr-del') { if (confirm('¿Borrar este dron?')) { DB.drones = DB.drones.filter(x => x.id !== a.dataset.id); if (DB.activeDrone === a.dataset.id) DB.activeDrone = DB.drones[0]?.id || ''; PF.edit = null; dbSave(); renderProfile(); renderSheet(); } }
+  else if (act === 'nov-close') { DB.novDismissed = [...(DB.novDismissed || []), a.dataset.id]; dbSave(); novedades(); }
+  else if (act === 'nov-go') { setView('news'); }
+  else if (act === 'recommend') recommend();
+  else if (act === 'spot') goSpot(+a.dataset.i);
   else if (act === 'copy') copyText(a.dataset.t);
   else if (act === 'prep') { const g = groupByKey(a.dataset.g); if (g) openReq(reqFor(g).id); }
   else if (act === 'prepall') { S.ev.groups.forEach(g => reqFor(g)); toast('Solicitudes preparadas'); setView('permits'); }
@@ -431,22 +542,40 @@ function closeModal() { $('.modal')?.remove(); }
 
 document.addEventListener('change', async e => {
   const t = e.target;
-  if (t.dataset.ctl === 'height') { S.height = +t.value; renderSheet(); loadOverlay(); }
+  if (t.dataset.ctl === 'height') { S.height = +t.value; S.spots = null; spotLayer.clearLayers(); renderSheet(); loadOverlay(); }
   else if (t.dataset.ctl === 'radius') { S.radius = +t.value; analyze(); }
   else if (t.dataset.ctl === 'urban') { S.urban = t.value; renderSheet(); }
   else if (t.dataset.ctl === 'when') { if (t.value) { S.when = new Date(t.value); renderSheet(); } }
   else if (t.dataset.chk) { DB.checks[t.dataset.chk] = t.checked; DB.checks.day = ymd(new Date()); dbSave(); }
+  else if (t.dataset.dm) { const d = DB.drones.find(x => x.id === PF.edit), m = DRONES.find(x => x.id === t.value); if (d && m) { d.droneModel = m.id; if (m.g) { d.droneName = d.droneName || m.name; d.droneG = m.g; } dbSave(); renderProfile(); } }
+  else if (t.dataset.dr) { const d = DB.drones.find(x => x.id === PF.edit); if (d) { d[t.dataset.dr] = t.value; dbSave(); if (['droneG', 'droneClass'].includes(t.dataset.dr)) renderProfile(); renderSheet(); } }
+  else if (t.dataset.drc) { const d = DB.drones.find(x => x.id === PF.edit); if (d) { d.droneCamera = t.checked; dbSave(); renderProfile(); renderSheet(); } }
   else if (t.dataset.pb) {
-    const k = t.dataset.pb;
-    if (k === 'droneModel') { const d = DRONES.find(x => x.id === t.value); DB.profile.droneModel = t.value; if (d && d.g) { DB.profile.droneName = d.name; DB.profile.droneG = d.g; } else if (t.value === 'otro') { DB.profile.droneName = ''; DB.profile.droneG = ''; } dbSave(); renderProfile(); }
-    else { DB.profile[k] = t.value; dbSave(); if (['droneG', 'droneClass', 'pilotCert', 'droneName'].includes(k)) renderProfile(); else { const s = $('.meter i'); if (s) s.style.width = profileScore() + '%'; } renderSheet(); }
+    const k = t.dataset.pb; DB.profile[k] = t.value; dbSave();
+    if (k === 'pilotCert') renderProfile(); else { const s = $('.meter i'); if (s) s.style.width = profileScore() + '%'; } renderSheet();
   }
-  else if (t.dataset.pbc) { DB.profile[t.dataset.pbc] = t.checked; dbSave(); renderProfile(); }
   else if (t.dataset.rb) { const r = DB.requests.find(x => x.id === PV.id); if (!r) return; let v = t.value; if (t.type === 'number') v = +v; setPath(r, t.dataset.rb, v); if (t.dataset.rb === 'status') setStatus(r, v); dbSave(); renderPermits(); }
   else if (t.id === 'docFile' && t.files[0]) { try { const data = await resizeImage(t.files[0]), type = $('#docType').value, nm = $('#docType').selectedOptions[0].text; DB.docs.push({ id: uid(), type, name: nm, data }); if (dbSave()) { renderProfile(); toast('Documento guardado'); } else DB.docs.pop(); } catch { toast('No he podido leer esa imagen'); } }
   else if (t.id === 'importFile' && t.files[0]) { try { const j = JSON.parse(await t.files[0].text()); Object.assign(DB, j); dbSave(); location.reload(); } catch { toast('Ese archivo no es una copia válida'); } }
 });
 document.addEventListener('input', e => { const t = e.target; if (t.dataset.ctl === 'height') $('#hLbl').textContent = t.value + ' m'; });
+
+/* ========================= NOVEDADES ========================= */
+const STRONG = /\bUAS\b|aeronaves? no tripuladas?|\bRPAS\b|\bdrones?\b|pilotadas? por control remoto/i;
+/* Avisos: (1) normas nuevas del BOE sobre drones posteriores a la última revisión de las reglas, (2) cambios en rules.json. */
+function novItems() {
+  const dis = DB.novDismissed || [], out = [], rev = RULES.reviewed || '';
+  NEWS.items.filter(i => i.source === 'BOE' && STRONG.test(i.title) && i.date.slice(0, 10) > rev)
+    .forEach(i => out.push({ id: i.id || i.title, ico: '⚖️', t: 'Nueva norma sobre drones en el BOE', d: i.title, url: i.url, warn: 'Puede cambiar las reglas de la app hasta que se revisen. Consulta el texto oficial.' }));
+  (RULES.changelog || []).filter(c => c.date > (DB.firstSeen || '')).forEach(c => out.push({ id: 'cl-' + c.date + c.text.slice(0, 16), ico: '🔄', t: 'Reglas actualizadas', d: c.text }));
+  return out.filter(x => !dis.includes(x.id)).slice(0, 3);
+}
+function novHtml() {
+  return novItems().map(n => `<div class="card warn"><div class="row" style="justify-content:space-between;align-items:flex-start;flex-wrap:nowrap"><div style="min-width:0;flex:1;overflow-wrap:anywhere"><b>${n.ico} ${esc(n.t)}</b><div class="small">${esc(n.d)}</div>${n.warn ? `<div class="small muted">${esc(n.warn)}</div>` : ''}</div><button class="btn sec sm" style="flex:none" data-act="nov-close" data-id="${esc(n.id)}" aria-label="Cerrar aviso">✕</button></div>
+    <div class="actions">${n.url ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(n.url)}">Leer la norma</a>` : ''}<button class="btn sec sm" data-act="nov-go">Ver novedades</button></div></div>`).join('');
+}
+function novedades() { renderSheet(); }
+function novedadesRefrescar() { if (!S.loading) renderSheet(); updateBadge(); }
 
 /* ========================= ARRANQUE ========================= */
 function showOnboarding() {
@@ -458,15 +587,29 @@ function boot() {
   dbLoad(); initMap();
   $$('#nav button').forEach(b => b.onclick = () => setView(b.dataset.view));
   $('#btnLocate').onclick = locate;
-  $('#btnBase').onclick = () => { map.removeLayer(baseLayer); base = 1 - base; baseLayer = BASES[base]().addTo(map); baseLayer.bringToBack(); };
+  $('#btnBase').onclick = () => { const i = BASES.findIndex(b => b.id === DB.base); setBase(BASES[(i + 1) % BASES.length].id, true); };
+  $('#btnFree').onclick = toggleFree;
   $('#btnLayers').onclick = () => { const p = $('#layersPanel'); p.hidden = !p.hidden; };
   $$('#layersPanel input').forEach(i => { i.checked = DB.layers[i.dataset.layer] !== false; i.onchange = () => { DB.layers[i.dataset.layer] = i.checked; dbSave(); loadOverlay(); }; });
   $('#sheetHandle').onclick = () => setSheetTall(!S.sheetTall);
   $('#searchForm').onsubmit = e => { e.preventDefault(); search($('#searchInput').value); };
   $('#searchInput').addEventListener('input', () => { if (!$('#searchInput').value) $('#searchResults').hidden = true; });
+  if (!DB.firstSeen) DB.firstSeen = DB.onboarded ? '2026-10-25' : ymd(new Date()); // las novedades solo cuentan desde que usas la app
   renderSheet(); updateBadge();
   if (!DB.onboarded) showOnboarding();
-  loadNews().catch(() => { });
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => { });
+  cargarReglas().then(() => { renderSheet(); novedadesRefrescar(); });
+  loadNews().then(novedadesRefrescar).catch(() => { });
+  // Actualización automática: versión de la app (service worker), reglas, noticias y zonas, cada vez que vuelves a abrirla.
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('sw.js').catch(() => { });
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (had && !window.__rl) { window.__rl = 1; toast('Nueva versión instalada. Actualizando…'); setTimeout(() => location.reload(), 900); } });
+  }
+  let last = Date.now();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || Date.now() - last < 15 * 60e3) return; last = Date.now();
+    navigator.serviceWorker?.getRegistration().then(r => r?.update()).catch(() => { });
+    cargarReglas().then(() => { renderSheet(); novedadesRefrescar(); }); loadNews(true).then(novedadesRefrescar); loadOverlay();
+  });
 }
 boot();
